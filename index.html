@@ -1,0 +1,1181 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#14161a">
+<title>Amicuna 運営ビューア（閲覧＋審査）</title>
+<style>
+  :root {
+    --bg: #14161a; --panel: #1d2026; --panel2: #23262d; --line: #32363f;
+    --text: #dfe3e8; --dim: #8b919c; --accent: #4fc3b8; --accent-dim: #2a6f68;
+    --good: #3fbf7f; --warn: #d9a53f; --bad: #e06060; --mono: Consolas, "Courier New", monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.6 "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 10px 16px;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 10; flex-wrap: wrap;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header h1 .ro { color: var(--accent); font-size: 12px; border: 1px solid var(--accent-dim); border-radius: 3px; padding: 1px 6px; margin-left: 8px; vertical-align: 1px; }
+  nav { display: flex; gap: 4px; }
+  nav button {
+    background: none; border: 1px solid transparent; color: var(--dim); padding: 5px 12px;
+    border-radius: 5px; cursor: pointer; font-size: 13px;
+  }
+  nav button:hover { color: var(--text); }
+  nav button.active { background: var(--panel2); color: var(--accent); border-color: var(--line); }
+  #conn { margin-left: auto; font-size: 12px; color: var(--dim); display: flex; align-items: center; gap: 8px; }
+  #conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bad); display: inline-block; }
+  #conn .dot.on { background: var(--good); }
+  main { padding: 16px; max-width: 1500px; margin: 0 auto; }
+  button.btn {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 5px; padding: 5px 12px; cursor: pointer; font-size: 13px;
+  }
+  button.btn:hover { border-color: var(--accent-dim); }
+  button.btn.primary { background: var(--accent-dim); border-color: var(--accent-dim); color: #fff; }
+  button.btn:disabled { opacity: .4; cursor: default; }
+  input, select, textarea {
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 5px; padding: 5px 8px; font-size: 13px; font-family: inherit;
+  }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent-dim); }
+  .mono { font-family: var(--mono); font-size: 12px; }
+  .dim { color: var(--dim); }
+  .null { color: var(--dim); font-style: italic; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 10px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .chip {
+    background: var(--panel2); border: 1px solid var(--line); color: var(--dim);
+    border-radius: 14px; padding: 3px 12px; cursor: pointer; font-size: 12px;
+  }
+  .chip.active { color: var(--accent); border-color: var(--accent-dim); }
+  .badge { display: inline-block; border-radius: 3px; padding: 1px 8px; font-size: 12px; border: 1px solid var(--line); }
+  .badge.pending { color: var(--warn); border-color: var(--warn); }
+  .badge.approved { color: var(--good); border-color: var(--good); }
+  .badge.rejected { color: var(--bad); border-color: var(--bad); }
+  .badge.good { color: var(--good); border-color: var(--good); }
+  .badge.warn { color: var(--warn); border-color: var(--warn); }
+  .badge.bad { color: var(--bad); border-color: var(--bad); }
+  .badge.grey { color: var(--dim); }
+  .callout { border-left: 3px solid var(--bad); background: var(--panel); padding: 8px 12px; margin-bottom: 12px; font-size: 13px; border-radius: 0 6px 6px 0; }
+  .callout.info { border-left-color: var(--accent-dim); }
+  table.grid { border-collapse: collapse; width: 100%; font-size: 13px; }
+  table.grid th, table.grid td { border-bottom: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
+  table.grid th { color: var(--dim); font-weight: 600; white-space: nowrap; position: sticky; top: 49px; background: var(--panel); }
+  table.grid th.sortable { cursor: pointer; }
+  table.grid th.sortable:hover { color: var(--accent); }
+  table.grid tr.clickable { cursor: pointer; }
+  table.grid tr.clickable:hover td { background: var(--panel2); }
+  .gridwrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  .trunc { cursor: pointer; color: var(--text); }
+  .trunc:hover { color: var(--accent); }
+  .rowcard { padding: 10px 14px; border-bottom: 1px solid var(--line); cursor: pointer; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+  .rowcard:hover { background: var(--panel2); }
+  .rowcard:last-child { border-bottom: none; }
+  .detail { padding: 14px; border-top: 1px solid var(--line); background: var(--bg); cursor: default; display: grid; grid-template-columns: minmax(340px, 1.2fr) 1fr; gap: 16px; }
+  .detail .full { grid-column: 1 / -1; }
+  .imgs { display: flex; gap: 12px; flex-wrap: wrap; }
+  .imgbox { flex: 1 1 240px; min-width: 240px; }
+  .imglabel { font-size: 12px; color: var(--dim); margin-bottom: 4px; }
+  .imgpath { color: var(--dim); word-break: break-all; margin-bottom: 4px; }
+  .imgholder { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; min-height: 140px; display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 12px; padding: 6px; }
+  .imgholder.err { color: var(--bad); }
+  .imgholder img { max-width: 100%; max-height: 380px; cursor: zoom-in; border-radius: 4px; }
+  dl.facts { display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; margin: 0; font-size: 13px; }
+  dl.facts dt { color: var(--dim); white-space: nowrap; }
+  dl.facts dd { margin: 0; word-break: break-all; }
+  .sqlbox { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin-top: 10px; }
+  .sqlbox h4 { margin: 0 0 8px; font-size: 13px; color: var(--accent); }
+  .sqlbox pre { background: var(--bg); border: 1px solid var(--line); border-radius: 5px; padding: 8px 10px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-all; margin: 8px 0; }
+  .sqlbox .warnline { color: var(--warn); font-size: 12px; }
+  .formline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; font-size: 13px; }
+  .layout { display: grid; grid-template-columns: 230px 1fr; gap: 14px; align-items: start; }
+  .side { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px; max-height: 75vh; overflow-y: auto; }
+  .sideitem { display: block; width: 100%; text-align: left; background: none; border: none; color: var(--dim); padding: 6px 10px; border-radius: 5px; cursor: pointer; font-size: 13px; font-family: var(--mono); }
+  .sideitem:hover { background: var(--panel2); color: var(--text); }
+  .sideitem.active { background: var(--panel2); color: var(--accent); }
+  .placeholder { color: var(--dim); padding: 40px; text-align: center; }
+  .crumbs { font-family: var(--mono); font-size: 12px; }
+  .crumbs a { color: var(--accent); cursor: pointer; text-decoration: none; }
+  details.checklist { margin-top: 10px; font-size: 13px; }
+  details.checklist summary { cursor: pointer; color: var(--dim); }
+  details.checklist li { margin: 3px 0; }
+  #lightbox { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.88); z-index: 100; flex-direction: column; }
+  #lightbox.open { display: flex; }
+  #lightbox .lbbar { display: flex; gap: 8px; align-items: center; padding: 8px 14px; color: var(--dim); font-size: 12px; }
+  #lightbox .lbbar .cap { flex: 1; word-break: break-all; }
+  #lightbox .lbview { flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center; }
+  #lightbox img { transition: transform .15s; }
+  #lightbox img.fit { max-width: 96vw; max-height: 88vh; }
+  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 8px 18px; font-size: 13px; display: none; z-index: 200; max-width: 80vw; }
+  #toast.err { border-color: var(--bad); color: var(--bad); }
+  .connform { max-width: 620px; margin: 40px auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 24px; }
+  .connform label { display: block; margin: 12px 0 4px; font-size: 13px; color: var(--dim); }
+  .connform input[type=url], .connform input[type=password] { width: 100%; }
+  .connform ul { font-size: 12px; color: var(--dim); padding-left: 18px; }
+  .pager { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--dim); }
+  @media (max-width: 700px) {
+    .detail, .layout { grid-template-columns: 1fr; }
+    main { padding: 10px; }
+    .side { max-height: 200px; }
+    .connform { margin: 16px auto; padding: 16px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Amicuna 運営ビューア<span class="ro">閲覧＋審査</span></h1>
+  <nav>
+    <button data-tab="review">審査キュー</button>
+    <button data-tab="tables">テーブル</button>
+    <button data-tab="storage">ストレージ</button>
+    <button data-tab="users">ユーザー</button>
+  </nav>
+  <div id="conn"><span class="dot"></span><span id="connText">未接続</span><button class="btn" id="disconnBtn" style="display:none">切断</button></div>
+</header>
+<main id="view"></main>
+
+<div id="lightbox">
+  <div class="lbbar">
+    <button class="btn" id="lbRotate">回転 90°</button>
+    <button class="btn" id="lbFit">等倍 / フィット</button>
+    <span class="cap mono" id="lbCap"></span>
+    <button class="btn" id="lbClose">閉じる (Esc)</button>
+  </div>
+  <div class="lbview"><img id="lbImg" class="fit" alt=""></div>
+</div>
+<div id="toast"></div>
+
+<script>
+'use strict';
+/* Amicuna 運営ビューア — Supabase 閲覧＋本人確認審査ダッシュボード
+ * 依存ゼロの単一ファイル。Supabase の REST(PostgREST) / Storage / Auth Admin API を
+ * fetch で直接叩く。書き込みは本人確認の審査RPC（approve/reject）2本のみを許可し、
+ * それ以外の更新・削除・INSERT はコード上のガードで遮断している。
+ * 審査手順の正本は supabase/IDENTITY_REVIEW_OPS.md。 */
+
+// ---------- 定数（スキーマは supabase/migrations/ の定義に一致させること） ----------
+// 既定URLは tools/supabase_security_audit.py と同じ本番プロジェクト（東京）に由来
+const DEFAULT_URL = 'https://jtdetpmorgihuzqkayni.supabase.co';
+// 公開可能キー（lib/utils/supabase_config.dart と同一値。RLS前提で公開配布してよいキー）
+const PUBLISHABLE_KEY = 'sb_publishable_3acCV-N2wUfDGhN6A72D1Q_-99vpH6O';
+const SS_KEY = 'amicuna_sb_viewer';
+const DOC_BUCKET = 'identity-docs';
+
+const DOC_TYPES = {
+  driversLicense: '運転免許証',
+  drivingHistoryCertificate: '運転経歴証明書',
+  myNumberCard: 'マイナンバーカード',
+  residenceCard: '在留カード',
+  specialPermanentResident: '特別永住者証明書',
+};
+const STATUS_LABEL = { pending: '審査待ち', approved: '承認済み', rejected: '却下' };
+const GENDER_LABEL = { female: '女性 (female)', male: '男性 (male)', notListed: '記載なし (notListed)' };
+// 承認SQLで選択できる転記性別（IDENTITY_REVIEW_OPS.md の真理表。male はどの書類でも承認不可）
+const GENDER_OPTIONS = {
+  driversLicense: ['female', 'notListed'],
+  drivingHistoryCertificate: ['female', 'notListed'],
+  myNumberCard: ['female', 'notListed'],
+  residenceCard: ['female'],
+  specialPermanentResident: ['female'],
+};
+const GENDER_RULE = {
+  driversLicense: '性別欄なし。自撮りとの目視照合で女性と判断できた場合のみ female。迷う場合は notListed（無理に決めない）。目視で男性と思われる場合は承認不可 — 定型文「男性のため利用不可」で却下し、運営責任者へエスカレーション。',
+  drivingHistoryCertificate: '性別欄なし。自撮りとの目視照合で女性と判断できた場合のみ female。迷う場合は notListed（無理に決めない）。目視で男性と思われる場合は承認不可 — 定型文「男性のため利用不可」で却下し、運営責任者へエスカレーション。',
+  myNumberCard: '券面どおりに転記。次期券面（性別欄なし）は notListed。男性の券面は承認不可＝却下。',
+  residenceCard: '性別欄が必ずある。券面どおり。female のみ承認可（male は却下・notListed はDBが拒絶）。',
+  specialPermanentResident: '性別欄が必ずある。券面どおり。female のみ承認可（male は却下・notListed はDBが拒絶）。',
+};
+const REJECT_TEMPLATES = [
+  ['画像不鮮明', '画像が不鮮明です。書類全面が写るよう撮り直してください。'],
+  ['自撮りと別人の疑い', 'ご提出いただいた自撮り画像が、書類の顔写真とご本人であることを確認できませんでした。恐れ入りますが再度お顔がはっきり写る状態で撮影のうえ、再提出をお願いいたします。'],
+  ['男性のため利用不可', 'Amicunaは女性専用サービスのため、ご提出の書類ではご利用いただけません。'],
+  ['個人番号（裏面）が写っている', '個人番号（裏面）が写っています。表面のみを撮影して再提出してください。'],
+  ['書類種別の選択誤り', '書類の種類の選択が誤っています。正しい種類を選んで再提出してください。'],
+];
+const CHECKLIST = [
+  '書類が対象5種（免許証 / 経歴証明書 / マイナンバーカード表面 / 在留カード / 特別永住者証明書）のいずれか',
+  '画像の書類種別が行の document_type と一致（不一致は「書類の種類の選択が誤っています…」で却下）',
+  '生年月日が審査日時点で満20年以上前・書類が有効期限内',
+  '性別の転記根拠を確認（券面 or 免許証系は自撮りとの目視照合）',
+  '画像が鮮明で、画面の再撮影・加工・合成の痕跡がない',
+  'document_path の先頭フォルダが user_id と一致（不一致は即通報扱い）',
+  'selfie_path の自撮りが書類の顔写真と同一人物に見える（2026-07-10以前の旧行は selfie 無し）',
+];
+
+// ---------- 状態 ----------
+const S = {
+  url: '', key: '', // key = service_role キー（serviceモード）/ アクセストークン（adminモード）
+  mode: 'service', // 'service' = service_roleキー接続（全機能）/ 'admin' = 管理者ログイン（審査キューのみ）
+  refreshToken: '', persist: false,
+  tab: 'review',
+  swagger: null,
+  review: { status: 'pending', userFilter: '', offset: 0, limit: 25, openId: null },
+  tables: { list: [], current: null, offset: 0, limit: 50, sortCol: null, sortDir: 'asc', fCol: '', fOp: 'eq', fVal: '' },
+  storage: { buckets: null, bucket: null, prefix: '', offset: 0, limit: 200 },
+  users: { page: 1, perPage: 50, filter: '' },
+};
+
+// ---------- API（書き込みガード付き） ----------
+// ponytail: service_role を使うため技術的には何でも書けてしまう。
+// このガードが唯一の保証線 — 許可する書き込みは審査RPC 2本と Storage の list(POST) だけ。
+const REVIEW_RPCS = [
+  'approve_identity_verification', 'reject_identity_verification',           // serviceモード
+  'admin_approve_identity_verification', 'admin_reject_identity_verification', // adminモード（管理者ラッパ）
+];
+function assertAllowed(method, path) {
+  const m = method.toUpperCase();
+  if (m === 'GET' || m === 'HEAD') return;
+  if (m === 'POST' && path.startsWith('/storage/v1/object/list/')) return; // 一覧取得のみ（副作用なし）
+  if (m === 'POST' && REVIEW_RPCS.some(fn => path === '/rest/v1/rpc/' + fn)) return; // 審査の実行
+  if (m === 'POST' && (path === '/auth/v1/token' || path.startsWith('/auth/v1/token?'))) return; // ログイン・トークン更新のみ
+  if (m === 'POST' && path === '/auth/v1/logout') return; // 切断時のセッション失効
+  throw new Error('書き込みガード: ' + m + ' ' + path + ' は許可されていません');
+}
+async function api(path, opts = {}) {
+  const method = opts.method || 'GET';
+  assertAllowed(method, path);
+  const apikey = S.mode === 'admin' ? PUBLISHABLE_KEY : S.key;
+  const headers = Object.assign({ apikey, Authorization: 'Bearer ' + S.key }, opts.headers || {});
+  let body;
+  if (opts.body !== undefined) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(opts.body); }
+  const res = await fetch(S.url + path, { method, headers, body });
+  // adminモード: アクセストークン失効(401)は一度だけ自動更新して再試行
+  if (res.status === 401 && S.mode === 'admin' && S.refreshToken && !opts._retried) {
+    if (await refreshSession()) return api(path, Object.assign({}, opts, { _retried: true }));
+  }
+  if (!res.ok) {
+    let msg = 'HTTP ' + res.status;
+    try { const j = await res.json(); msg += ' — ' + (j.message || j.msg || j.error_description || j.error || JSON.stringify(j)); } catch (e) { /* 本文なし */ }
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
+  }
+  return res;
+}
+const apiJson = async (path, opts) => (await api(path, opts)).json();
+// 審査RPCの実行。エラー時はDBトリガーの RAISE メッセージがそのまま例外メッセージに載る
+const callReviewRpc = (fn, args) => api('/rest/v1/rpc/' + fn, { method: 'POST', body: args });
+// 読み取りRPC（stable）のGET用クエリ文字列
+function rpcQuery(params) {
+  return Object.entries(params)
+    .filter(([, v]) => v !== null && v !== undefined && v !== '')
+    .map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&');
+}
+// adminモードのトークン更新（失敗したらログイン画面へ戻す）
+async function refreshSession() {
+  try {
+    const res = await fetch(S.url + '/auth/v1/token?grant_type=refresh_token', {
+      method: 'POST',
+      headers: { apikey: PUBLISHABLE_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: S.refreshToken }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const j = await res.json();
+    S.key = j.access_token;
+    S.refreshToken = j.refresh_token || S.refreshToken;
+    persistSession();
+    return true;
+  } catch (e) {
+    disconnect();
+    toast('セッションの有効期限が切れました。再ログインしてください', true);
+    return false;
+  }
+}
+function persistSession() {
+  if (!S.persist) return;
+  sessionStorage.setItem(SS_KEY, JSON.stringify({ url: S.url, mode: S.mode, key: S.key, refreshToken: S.refreshToken }));
+}
+
+function encodePath(p) { return p.split('/').map(encodeURIComponent).join('/'); }
+
+const blobCache = new Map(); // path -> objectURL（タブ生存中のみ・ディスクに保存しない）
+async function fetchObjectUrl(bucket, path) {
+  const k = bucket + '/' + path;
+  if (blobCache.has(k)) return blobCache.get(k);
+  const res = await api('/storage/v1/object/authenticated/' + bucket + '/' + encodePath(path));
+  const u = URL.createObjectURL(await res.blob());
+  blobCache.set(k, u);
+  return u;
+}
+
+// Content-Range: "0-24/123" または "*/0" から総件数を得る
+function totalFromRange(res) {
+  const cr = res.headers.get('content-range');
+  if (!cr || !cr.includes('/')) return NaN;
+  return parseInt(cr.split('/')[1], 10);
+}
+async function countRows(table, query) {
+  const res = await api('/rest/v1/' + table + '?select=id&limit=1' + (query ? '&' + query : ''),
+    { headers: { Prefer: 'count=exact' } });
+  return totalFromRange(res);
+}
+
+// ---------- ユーティリティ ----------
+function el(tag, attrs, ...children) {
+  const n = document.createElement(tag);
+  if (attrs) for (const [k, v] of Object.entries(attrs)) {
+    if (v === null || v === undefined) continue;
+    if (k === 'class') n.className = v;
+    else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v);
+  }
+  for (const c of children.flat(9)) {
+    if (c === null || c === undefined || c === false) continue;
+    n.append(c instanceof Node ? c : String(c));
+  }
+  return n;
+}
+const fmtDT = new Intl.DateTimeFormat('ja-JP', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+const jst = ts => ts ? fmtDT.format(new Date(ts)) : '—';
+function jstToday() { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Tokyo' }).format(new Date()); }
+function calcAge(birth, today) {
+  const [by, bm, bd] = birth.split('-').map(Number);
+  const [ty, tm, td] = today.split('-').map(Number);
+  let a = ty - by;
+  if (tm < bm || (tm === bm && td < bd)) a--;
+  return a;
+}
+function idSpan(id) {
+  if (!id) return el('span', { class: 'null' }, 'null');
+  return el('span', {
+    class: 'mono trunc', title: id + '（クリックでコピー）',
+    onclick: e => { e.stopPropagation(); copyText(String(id)); },
+  }, String(id).slice(0, 8) + '…');
+}
+function copyText(t) {
+  const done = () => toast('コピーしました');
+  if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(t).then(done, () => fallbackCopy(t, done)); }
+  else fallbackCopy(t, done);
+}
+function fallbackCopy(t, done) {
+  const ta = el('textarea', { style: 'position:fixed;opacity:0' });
+  ta.value = t;
+  document.body.append(ta);
+  ta.select();
+  try { document.execCommand('copy'); done(); } catch (e) { toast('コピーできません。手動で選択してください', true); }
+  ta.remove();
+}
+let toastTimer = null;
+function toast(msg, isErr) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = isErr ? 'err' : '';
+  t.style.display = 'block';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.style.display = 'none'; }, isErr ? 8000 : 3000);
+}
+function sqlEsc(s) { return String(s).replace(/'/g, "''"); }
+// 個人番号（12桁数字）らしき文字列の警告。DB側トリガーと同じ趣旨のクライアント側の事前警告
+function looksLikeMyNumber(s) {
+  const half = String(s).replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+  return /\d{12}/.test(half.replace(/[-‐‑–—ー−\s]/g, ''));
+}
+function scoreBadge(score) {
+  if (score === null || score === undefined) return el('span', { class: 'badge grey', title: '顔照合モデル未同梱ビルド・照合失敗時は null' }, '顔照合値なし');
+  const s = Number(score);
+  const cls = s >= 0.5 ? 'good' : (s < 0.3 ? 'bad' : 'warn');
+  const hint = s >= 0.5 ? '同一人物の目安圏' : (s < 0.3 ? '別人の目安圏' : '判定困難圏');
+  return el('span', { class: 'badge ' + cls, title: '参考値。この値だけで承認・却下を判断しないこと（照明・化粧・経年で大きく変動）' },
+    '顔照合 ' + s.toFixed(2) + '（' + hint + '）');
+}
+function statusBadge(st) { return el('span', { class: 'badge ' + st }, STATUS_LABEL[st] || st); }
+// 非同期描画のstale書き込み防止: コンテナがDOMから外れていたら捨てる
+const alive = node => node.isConnected;
+
+// ---------- 接続 ----------
+function jwtRole(key) {
+  try { return JSON.parse(atob(key.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).role || null; }
+  catch (e) { return null; } // 新形式キー(sb_secret_...)はJWTではない
+}
+async function connect(url, key, save) {
+  S.url = url.replace(/\/+$/, '');
+  S.key = key.trim();
+  S.mode = 'service';
+  S.refreshToken = '';
+  S.persist = save;
+  try {
+    await api('/auth/v1/admin/users?page=1&per_page=1'); // service_role でないと 401/403
+  } catch (e) {
+    const role = jwtRole(S.key);
+    S.url = ''; S.key = ''; // 検証に通るまで接続状態にしない（失敗時は接続フォームに留まる）
+    if (role && role !== 'service_role') e.message += '（このキーの role は ' + role + ' です。service_role キーが必要）';
+    throw e;
+  }
+  persistSession();
+  updateConnUI();
+  render();
+}
+async function loginAdmin(url, email, password, save) {
+  S.url = url.replace(/\/+$/, '');
+  S.mode = 'admin';
+  S.persist = save;
+  try {
+    const j = await apiJson('/auth/v1/token?grant_type=password', {
+      method: 'POST', body: { email, password },
+      headers: { Authorization: 'Bearer ' + PUBLISHABLE_KEY },
+    });
+    S.key = j.access_token;
+    S.refreshToken = j.refresh_token || '';
+    // 管理者登録の確認（admin_users 未登録なら ADMIN: エラーで弾かれる）
+    await apiJson('/rest/v1/rpc/admin_count_identity_verifications');
+  } catch (e) {
+    S.url = ''; S.key = ''; S.refreshToken = ''; S.mode = 'service';
+    throw e;
+  }
+  S.tab = 'review';
+  persistSession();
+  updateConnUI();
+  render();
+}
+function disconnect() {
+  // adminモードはサーバー側のセッションも失効させる（fire-and-forget・失敗しても切断は続行）
+  if (S.mode === 'admin' && S.key) {
+    fetch(S.url + '/auth/v1/logout', {
+      method: 'POST',
+      headers: { apikey: PUBLISHABLE_KEY, Authorization: 'Bearer ' + S.key },
+    }).catch(() => {});
+  }
+  sessionStorage.removeItem(SS_KEY);
+  S.url = ''; S.key = ''; S.refreshToken = ''; S.mode = 'service'; S.persist = false; S.swagger = null;
+  for (const u of blobCache.values()) URL.revokeObjectURL(u);
+  blobCache.clear();
+  updateConnUI();
+  render();
+}
+function updateConnUI() {
+  const on = !!S.key;
+  document.querySelector('#conn .dot').className = 'dot' + (on ? ' on' : '');
+  document.getElementById('connText').textContent = on
+    ? new URL(S.url).host + (S.mode === 'admin' ? '（管理者）' : '（service_role）')
+    : '未接続';
+  document.getElementById('disconnBtn').style.display = on ? '' : 'none';
+}
+
+function renderConnect() {
+  const url = el('input', { type: 'url', value: DEFAULT_URL, spellcheck: 'false', style: 'width:100%' });
+  const save = el('input', { type: 'checkbox', checked: '' });
+  // 管理者ログイン（推奨・スマホ対応・審査キュー専用）
+  const email = el('input', { type: 'email', placeholder: 'メールアドレス', autocomplete: 'username', style: 'width:100%' });
+  const pass = el('input', { type: 'password', placeholder: 'パスワード', autocomplete: 'current-password', style: 'width:100%;margin-top:6px' });
+  const loginBtn = el('button', { class: 'btn primary', style: 'margin-top:12px' }, 'ログイン');
+  loginBtn.addEventListener('click', async () => {
+    loginBtn.disabled = true;
+    try { await loginAdmin(url.value, email.value.trim(), pass.value, save.checked); toast('ログインしました'); }
+    catch (e) { toast('ログイン失敗: ' + e.message, true); }
+    loginBtn.disabled = false;
+  });
+  pass.addEventListener('keydown', e => { if (e.key === 'Enter') loginBtn.click(); });
+  // service_role 接続（PC・全機能）
+  const key = el('input', { type: 'password', placeholder: 'service_role キー', autocomplete: 'off', style: 'width:100%' });
+  const connBtn = el('button', { class: 'btn', style: 'margin-top:12px' }, 'service_role で接続');
+  connBtn.addEventListener('click', async () => {
+    connBtn.disabled = true;
+    try { await connect(url.value, key.value, save.checked); toast('接続しました'); }
+    catch (e) { toast('接続失敗: ' + e.message, true); }
+    connBtn.disabled = false;
+  });
+  key.addEventListener('keydown', e => { if (e.key === 'Enter') connBtn.click(); });
+  return el('div', { class: 'connform' },
+    el('h2', { style: 'margin:0 0 8px;font-size:16px' }, 'Amicuna 運営ログイン'),
+    el('p', { class: 'dim', style: 'font-size:13px;margin:0' },
+      '本人確認の目視審査（承認・却下）とデータ確認のための運営ツールです。このツールが行う書き込みは審査RPCのみで、それ以外の更新・削除・INSERT はコード内ガードで遮断されます。'),
+    el('label', null, 'プロジェクト URL'), url,
+    el('label', null, '管理者アカウント（スマホ・PC共通。審査キューが使えます）'),
+    email, pass,
+    el('label', { style: 'display:flex;gap:6px;align-items:center' }, save, 'このタブを閉じるまで記憶する（sessionStorage）'),
+    loginBtn,
+    el('details', { style: 'margin-top:18px' },
+      el('summary', { class: 'dim', style: 'cursor:pointer;font-size:13px' }, 'service_role キーで接続（PC専用・全機能: テーブル/ストレージ/ユーザー閲覧）'),
+      el('label', null, 'service_role キー（Studio → Settings → API）'), key, connBtn),
+    el('ul', null,
+      el('li', null, '管理者アカウントは Studio で作成し admin_users に登録した専用ユーザーです（審査権限のみ。漏えい時はパスワード変更で即失効できます）。'),
+      el('li', null, 'service_role キーは全権キーです。スマホ・共有PCには絶対に貼らないこと。'),
+      el('li', null, '書類画像・自撮り画像は要配慮の個人情報です。スクリーンショット・保存をしない。')));
+}
+
+// ---------- 審査キュー ----------
+// 一覧＋件数の取得。serviceモードは PostgREST 直、adminモードは管理者RPC（GET）経由
+async function fetchReviewPage() {
+  const r = S.review;
+  const stFilter = r.status === 'all' ? null : r.status;
+  if (S.mode === 'admin') {
+    const uid = r.userFilter || null;
+    const cnt = st => apiJson('/rest/v1/rpc/admin_count_identity_verifications?' + rpcQuery({ p_status: st, p_user_id: uid }));
+    const [pend, appr, rej, rows] = await Promise.all([
+      cnt('pending'), cnt('approved'), cnt('rejected'),
+      apiJson('/rest/v1/rpc/admin_list_identity_verifications?' +
+        rpcQuery({ p_status: stFilter, p_user_id: uid, p_limit: r.limit, p_offset: r.offset })),
+    ]);
+    const counts = [pend, appr, rej];
+    const total = stFilter ? counts[['pending', 'approved', 'rejected'].indexOf(stFilter)] : pend + appr + rej;
+    return { counts, rows, total };
+  }
+  const uf = r.userFilter ? '&user_id=eq.' + encodeURIComponent(r.userFilter) : '';
+  const [counts, rowsRes] = await Promise.all([
+    Promise.all(['pending', 'approved', 'rejected'].map(st => countRows('identity_verifications', 'status=eq.' + st + uf))),
+    api('/rest/v1/identity_verifications?select=*&order=created_at.asc,id.asc&limit=' + r.limit +
+      '&offset=' + r.offset + (stFilter ? '&status=eq.' + stFilter : '') + uf,
+      { headers: { Prefer: 'count=exact' } }),
+  ]);
+  return { counts, rows: await rowsRes.json(), total: totalFromRange(rowsRes) };
+}
+
+function renderReview() {
+  const root = el('div');
+  root.append(el('div', { class: 'callout' },
+    el('b', null, 'マイナンバー裏面（個人番号）が写っていた場合: '),
+    '審査より先に Studio → Storage で該当オブジェクトを即削除（保管自体が違法・番号法20条）。このビューアからは削除できません。個人番号・氏名・住所を却下理由やメモに絶対に転記しないこと。'));
+
+  const chips = el('div', { class: 'toolbar' });
+  const listBox = el('div', { class: 'card' }, el('div', { class: 'placeholder' }, '読込中…'));
+  const pager = el('div', { class: 'pager' });
+  root.append(chips, listBox, pager);
+
+  (async () => {
+    try {
+      const { counts, rows, total } = await fetchReviewPage();
+      if (!alive(root)) return;
+      // 他所の審査でキューが縮んで offset が総件数を超えたら最終ページへ戻す
+      if (!rows.length && total > 0 && S.review.offset > 0) {
+        S.review.offset = Math.floor((total - 1) / S.review.limit) * S.review.limit;
+        render();
+        return;
+      }
+      const all = counts[0] + counts[1] + counts[2];
+
+      // ステータスチップ
+      chips.textContent = '';
+      const defs = [['pending', counts[0]], ['approved', counts[1]], ['rejected', counts[2]], ['all', all]];
+      for (const [st, n] of defs) {
+        chips.append(el('button', {
+          class: 'chip' + (S.review.status === st ? ' active' : ''),
+          onclick: () => { S.review.status = st; S.review.offset = 0; S.review.openId = null; render(); },
+        }, (st === 'all' ? 'すべて' : STATUS_LABEL[st]) + ' ' + n));
+      }
+      if (S.review.userFilter) {
+        chips.append(el('span', { class: 'badge grey mono' }, '利用者: ' + S.review.userFilter.slice(0, 8) + '…'),
+          el('button', { class: 'btn', onclick: () => { S.review.userFilter = ''; S.review.offset = 0; render(); } }, '絞り込み解除'));
+      }
+      chips.append(el('button', { class: 'btn', style: 'margin-left:auto', onclick: () => render() }, '再読込'));
+
+      // 一覧
+      listBox.textContent = '';
+      if (!rows.length) listBox.append(el('div', { class: 'placeholder' }, '該当する申請はありません'));
+      for (const row of rows) listBox.append(buildReviewRow(row));
+
+      // ページャ
+      pager.textContent = '';
+      const from = total ? S.review.offset + 1 : 0;
+      const to = S.review.offset + rows.length;
+      pager.append(
+        el('button', { class: 'btn', disabled: S.review.offset === 0 ? '' : null, onclick: () => { S.review.offset = Math.max(0, S.review.offset - S.review.limit); render(); } }, '前へ'),
+        el('span', null, from + '–' + to + ' / ' + total + ' 件（申請日時の古い順）'),
+        el('button', { class: 'btn', disabled: to >= total ? '' : null, onclick: () => { S.review.offset += S.review.limit; render(); } }, '次へ'));
+    } catch (e) {
+      if (alive(root)) { listBox.textContent = ''; listBox.append(el('div', { class: 'placeholder' }, '読込失敗: ' + e.message)); }
+    }
+  })();
+  return root;
+}
+
+function buildReviewRow(row) {
+  const card = el('div', { class: 'card' });
+  const head = el('div', { class: 'rowcard' },
+    statusBadge(row.status),
+    el('span', null, DOC_TYPES[row.document_type] || row.document_type),
+    el('span', { class: 'dim' }, '申請 ' + jst(row.created_at)),
+    el('span', { class: 'dim' }, '利用者 ', idSpan(row.user_id)),
+    scoreBadge(row.face_match_score),
+    row.selfie_path ? null : el('span', { class: 'badge warn', title: '2026-07-10以前の旧申請' }, '自撮りなし'),
+    row.gender_on_document ? el('span', { class: 'badge grey' }, '転記: ' + (GENDER_LABEL[row.gender_on_document] || row.gender_on_document)) : null,
+  );
+  head.addEventListener('click', () => {
+    const open = card.querySelector('.detail');
+    if (open) { open.remove(); S.review.openId = null; }
+    else { S.review.openId = row.id; card.append(buildReviewDetail(row)); }
+  });
+  card.append(head);
+  if (S.review.openId === row.id) card.append(buildReviewDetail(row));
+  return card;
+}
+
+function imageBox(label, path, missingNote) {
+  const box = el('div', { class: 'imgbox' }, el('div', { class: 'imglabel' }, label));
+  if (!path) { box.append(el('div', { class: 'imgholder' }, missingNote || 'パスなし')); return box; }
+  box.append(el('div', { class: 'imgpath mono trunc', title: 'クリックでパスをコピー', onclick: () => copyText(path) }, path));
+  const holder = el('div', { class: 'imgholder' }, '読込中…');
+  box.append(holder);
+  fetchObjectUrl(DOC_BUCKET, path).then(u => {
+    if (!alive(holder)) return;
+    holder.textContent = '';
+    holder.append(el('img', { src: u, alt: label, onclick: () => openLightbox(u, label + ' — ' + path) }));
+  }).catch(e => {
+    if (!alive(holder)) return;
+    holder.classList.add('err');
+    holder.textContent = e.status === 404 || e.status === 400
+      ? '画像が見つかりません（クリーンアップ削除済み・または未アップロード）'
+      : '取得失敗: ' + e.message;
+  });
+  return box;
+}
+
+function buildReviewDetail(row) {
+  const d = el('div', { class: 'detail', onclick: e => e.stopPropagation() });
+
+  // 左: 画像（書類と自撮りを並べて目視照合）
+  const left = el('div', null,
+    el('div', { class: 'imgs' },
+      imageBox('書類画像（生年月日・性別欄・有効期限を確認）', row.document_path),
+      imageBox('自撮り画像（書類の顔写真と見比べる）', row.selfie_path, '自撮りなし（2026-07-10以前の旧申請のため対象外）')));
+
+  // path先頭フォルダ ≠ user_id の防御チェック（DB制約済みだが不一致は即通報扱いのため表示）
+  for (const p of [row.document_path, row.selfie_path]) {
+    if (p && p.split('/')[0] !== row.user_id) {
+      left.append(el('div', { class: 'callout' }, 'パスの先頭フォルダが user_id と一致しません。即通報扱いの異常データです: ' + p));
+    }
+  }
+
+  // 右: 転記事実・利用者情報
+  const today = jstToday();
+  const facts = el('dl', { class: 'facts' },
+    el('dt', null, '申請ID'), el('dd', null, idSpan(row.id)),
+    el('dt', null, '利用者ID'), el('dd', null, idSpan(row.user_id), ' ',
+      el('button', { class: 'btn', style: 'padding:1px 8px;font-size:12px', onclick: () => { S.review.userFilter = row.user_id; S.review.offset = 0; S.review.status = 'all'; render(); } }, 'この利用者の全申請')),
+    el('dt', null, '書類種別'), el('dd', null, (DOC_TYPES[row.document_type] || row.document_type) + ' (' + row.document_type + ')'),
+    el('dt', null, 'ステータス'), el('dd', null, statusBadge(row.status)),
+    el('dt', null, '申請日時'), el('dd', null, jst(row.created_at)),
+    el('dt', null, '審査日時'), el('dd', null, jst(row.reviewed_at)),
+    el('dt', null, '転記生年月日'), el('dd', null, row.birth_date_on_document
+      ? row.birth_date_on_document + '（現在 満' + calcAge(row.birth_date_on_document, today) + '歳）'
+      : el('span', { class: 'null' }, '未転記')),
+    el('dt', null, '転記性別'), el('dd', null, row.gender_on_document ? (GENDER_LABEL[row.gender_on_document] || row.gender_on_document) : el('span', { class: 'null' }, '未転記')),
+    el('dt', null, 'OCRヒント'), el('dd', { class: 'dim' }, (row.ocr_gender_hint ? (GENDER_LABEL[row.ocr_gender_hint] || row.ocr_gender_hint) : 'なし') + '（クライアント自己申告。券面は必ず自分の目で確認）'),
+    el('dt', null, '顔照合スコア'), el('dd', null, scoreBadge(row.face_match_score)),
+    el('dt', null, '審査メモ'), el('dd', null, row.review_note || el('span', { class: 'null' }, 'なし')),
+    el('dt', null, '却下理由'), el('dd', null, row.rejection_reason || el('span', { class: 'null' }, 'なし')),
+  );
+  const userBox = el('div', { style: 'margin-top:10px' },
+    el('button', { class: 'btn', onclick: e => loadUserInfo(e.currentTarget, row.user_id) }, '利用者情報・他の申請を取得'));
+  const right = el('div', null, facts, userBox);
+
+  // 下段: 監査ログ + SQL生成 + チェックリスト
+  const bottom = el('div', { class: 'full' });
+  const auditBox = el('div', { class: 'dim', style: 'font-size:12px' }, '監査ログ読込中…');
+  bottom.append(auditBox);
+  (S.mode === 'admin'
+    ? apiJson('/rest/v1/rpc/admin_list_identity_audits?' + rpcQuery({ p_verification_id: row.id }))
+    : apiJson('/rest/v1/identity_verification_audits?verification_id=eq.' + encodeURIComponent(row.id) + '&order=changed_at.asc'))
+    .then(audits => {
+      if (!alive(auditBox)) return;
+      auditBox.textContent = '';
+      if (!audits.length) { auditBox.append('監査ログ: なし（未審査）'); return; }
+      const tbl = el('table', { class: 'grid' },
+        el('thead', null, el('tr', null, ['変更日時', '遷移', '実行者', '転記生年月日', '転記性別', '却下理由', '審査メモ'].map(h => el('th', { style: 'position:static' }, h)))),
+        el('tbody', null, audits.map(a => el('tr', null,
+          el('td', null, jst(a.changed_at)),
+          el('td', null, (STATUS_LABEL[a.old_status] || a.old_status) + ' → ' + (STATUS_LABEL[a.new_status] || a.new_status)),
+          el('td', null, a.changed_by ? idSpan(a.changed_by) : el('span', { class: 'dim', title: 'Studio・service_role・システムによる直接操作' }, 'Studio/系統')),
+          el('td', null, a.birth_date_on_document || '—'),
+          el('td', null, a.gender_on_document ? (GENDER_LABEL[a.gender_on_document] || a.gender_on_document) : '—'),
+          el('td', null, a.rejection_reason || '—'),
+          el('td', null, a.review_note || '—')))));
+      auditBox.append(el('div', { class: 'imglabel' }, '監査ログ（identity_verification_audits・改変不可）'), el('div', { class: 'gridwrap' }, tbl));
+    })
+    .catch(e => { if (alive(auditBox)) auditBox.textContent = '監査ログ取得失敗: ' + e.message; });
+
+  if (row.status === 'pending' || row.status === 'rejected') bottom.append(buildApproveSql(row));
+  if (row.status === 'pending' || row.status === 'approved') bottom.append(buildRejectSql(row));
+  bottom.append(el('details', { class: 'checklist' },
+    el('summary', null, '承認チェックリスト（IDENTITY_REVIEW_OPS.md より）'),
+    el('ul', null, CHECKLIST.map(c => el('li', null, c)))));
+
+  d.append(left, right, bottom);
+  return d;
+}
+
+function loadUserInfo(btn, userId) {
+  btn.disabled = true;
+  const box = el('div', { style: 'margin-top:8px' }, el('span', { class: 'dim' }, '読込中…'));
+  btn.parentElement.append(box);
+  // モード差はここで吸収して {auth, authErr, profile, apps} に正規化する
+  const load = S.mode === 'admin'
+    ? Promise.allSettled([
+        apiJson('/rest/v1/rpc/admin_get_review_user?' + rpcQuery({ p_user_id: userId })).then(rows => rows[0] || null),
+        apiJson('/rest/v1/rpc/admin_list_identity_verifications?' + rpcQuery({ p_user_id: userId, p_limit: 100 })),
+      ]).then(([u, apps]) => ({
+        auth: u.status === 'fulfilled' && u.value
+          ? { email: u.value.email, created_at: u.value.auth_created_at, last_sign_in_at: u.value.last_sign_in_at, banned_until: u.value.banned_until }
+          : null,
+        authErr: u.status === 'rejected' ? u.reason.message : 'ユーザーなし',
+        profile: u.status === 'fulfilled' && u.value && u.value.profile_role !== null
+          ? { display_name: u.value.display_name, role: u.value.profile_role, is_verified: u.value.is_verified, is_female_verified: u.value.is_female_verified }
+          : null,
+        apps: apps.status === 'fulfilled' ? apps.value : null,
+      }))
+    : Promise.allSettled([
+        apiJson('/auth/v1/admin/users/' + encodeURIComponent(userId)),
+        apiJson('/rest/v1/profiles?id=eq.' + encodeURIComponent(userId) + '&select=*'),
+        apiJson('/rest/v1/identity_verifications?user_id=eq.' + encodeURIComponent(userId) + '&order=created_at.asc&select=id,status,document_type,created_at,reviewed_at'),
+      ]).then(([u, p, apps]) => ({
+        auth: u.status === 'fulfilled' ? u.value : null,
+        authErr: u.status === 'rejected' ? u.reason.message : '',
+        profile: p.status === 'fulfilled' && p.value.length ? p.value[0] : null,
+        apps: apps.status === 'fulfilled' ? apps.value : null,
+      }));
+  load.then(info => {
+    if (!alive(box)) return;
+    box.textContent = '';
+    const dl = el('dl', { class: 'facts' });
+    if (info.auth) {
+      dl.append(
+        el('dt', null, 'メール'), el('dd', null, info.auth.email || el('span', { class: 'null' }, '（匿名認証）')),
+        el('dt', null, '登録日時'), el('dd', null, jst(info.auth.created_at)),
+        el('dt', null, '最終ログイン'), el('dd', null, jst(info.auth.last_sign_in_at)),
+        el('dt', null, 'BAN'), el('dd', null, info.auth.banned_until ? el('span', { class: 'badge bad' }, jst(info.auth.banned_until) + ' まで') : 'なし'));
+    } else dl.append(el('dt', null, 'Auth'), el('dd', { class: 'null' }, '取得失敗: ' + (info.authErr || '不明')));
+    if (info.profile) {
+      dl.append(
+        el('dt', null, '表示名'), el('dd', null, info.profile.display_name || '—'),
+        el('dt', null, 'ロール'), el('dd', null, String(info.profile.role)),
+        el('dt', null, '年齢確認バッジ'), el('dd', null, info.profile.is_verified ? el('span', { class: 'badge good' }, 'is_verified') : 'なし'),
+        el('dt', null, '女性確認バッジ'), el('dd', null, info.profile.is_female_verified ? el('span', { class: 'badge good' }, 'is_female_verified') : 'なし'));
+    } else dl.append(el('dt', null, 'プロフィール'), el('dd', { class: 'null' }, 'なし'));
+    box.append(dl);
+    if (info.apps) {
+      box.append(el('div', { class: 'imglabel', style: 'margin-top:6px' }, 'この利用者の申請履歴（' + info.apps.length + '件）— 男性判明時は過去の承認行の剥奪漏れに注意'),
+        el('ul', { style: 'margin:4px 0;padding-left:18px;font-size:12px' },
+          info.apps.map(a => el('li', null,
+            jst(a.created_at) + '　' + (DOC_TYPES[a.document_type] || a.document_type) + '　',
+            statusBadge(a.status)))));
+    }
+  });
+}
+
+function buildApproveSql(row) {
+  const box = el('div', { class: 'sqlbox' });
+  box.append(el('h4', null, '承認'),
+    el('div', { class: 'dim', style: 'font-size:12px' }, GENDER_RULE[row.document_type] || ''));
+  const birth = el('input', { type: 'date' });
+  const gender = el('select', null,
+    (GENDER_OPTIONS[row.document_type] || ['female', 'notListed']).map(g => el('option', { value: g }, GENDER_LABEL[g])));
+  const note = el('input', { type: 'text', placeholder: '審査メモ（任意・利用者から見えない）', style: 'flex:1;min-width:200px', maxlength: '500' });
+  const pre = el('pre', null, '');
+  const warn = el('div', { class: 'warnline' });
+  const execBtn = el('button', { class: 'btn primary' }, '承認を実行');
+  const copyBtn = el('button', { class: 'btn' }, 'SQLをコピー（Studio用）');
+  const update = () => {
+    warn.textContent = '';
+    if (!birth.value) { pre.textContent = '-- 書類から読み取った生年月日を入力してください'; execBtn.disabled = copyBtn.disabled = true; return; }
+    const age = calcAge(birth.value, jstToday());
+    if (age < 20) warn.textContent = '⚠ 本日時点で満' + age + '歳（20歳未満）。この承認はDBトリガーに拒絶されます。';
+    else if (age > 100) warn.textContent = '⚠ 本日時点で満' + age + '歳。生年月日の入力ミスでないか確認してください。';
+    if (looksLikeMyNumber(note.value)) warn.textContent += ' ⚠ メモに12桁の数字列（個人番号様）が含まれています。DBに拒絶されます。転記禁止。';
+    pre.textContent = "select approve_identity_verification('" + row.id + "', date '" + birth.value + "', '" + gender.value + "', '" + sqlEsc(note.value) + "');";
+    execBtn.disabled = copyBtn.disabled = false;
+  };
+  for (const i of [birth, gender, note]) i.addEventListener('input', update);
+  copyBtn.addEventListener('click', () => copyText(pre.textContent));
+  execBtn.addEventListener('click', async () => {
+    const age = calcAge(birth.value, jstToday());
+    const msg = 'この申請を承認します。\n\n'
+      + '書類: ' + (DOC_TYPES[row.document_type] || row.document_type) + '\n'
+      + '生年月日: ' + birth.value + '（本日時点で満' + age + '歳）\n'
+      + '転記性別: ' + GENDER_LABEL[gender.value]
+      + (note.value ? '\n審査メモ: ' + note.value : '')
+      + '\n\nprofiles のバッジが自動更新されます。よろしいですか？';
+    if (!confirm(msg)) return;
+    execBtn.disabled = true;
+    try {
+      await callReviewRpc(S.mode === 'admin' ? 'admin_approve_identity_verification' : 'approve_identity_verification',
+        { p_id: row.id, p_birth_date: birth.value, p_gender: gender.value, p_note: note.value });
+      toast('承認しました（' + (DOC_TYPES[row.document_type] || row.document_type) + ' / ' + GENDER_LABEL[gender.value] + '）');
+      S.review.openId = null;
+      render();
+    } catch (e) {
+      toast('承認できませんでした: ' + e.message, true);
+      execBtn.disabled = false;
+    }
+  });
+  update();
+  box.append(el('div', { class: 'formline' },
+    el('span', { class: 'dim' }, '書類上の生年月日:'), birth,
+    el('span', { class: 'dim' }, '転記性別:'), gender, note), warn, pre,
+    el('div', { class: 'formline' }, execBtn, copyBtn));
+  return box;
+}
+
+function buildRejectSql(row) {
+  const box = el('div', { class: 'sqlbox' });
+  box.append(el('h4', null, '却下（理由は利用者に表示・永久保存されます）'));
+  const sel = el('select', null,
+    el('option', { value: '' }, '定型文を選択…'),
+    REJECT_TEMPLATES.map(([label, text]) => el('option', { value: text }, label)));
+  const reason = el('textarea', { rows: '2', style: 'width:100%', maxlength: '500', placeholder: '却下理由（必須）。書類上の氏名・住所・番号を絶対に書かない' });
+  const pre = el('pre', null, '');
+  const warn = el('div', { class: 'warnline' });
+  const execBtn = el('button', { class: 'btn primary' }, '却下を実行');
+  const copyBtn = el('button', { class: 'btn' }, 'SQLをコピー（Studio用）');
+  sel.addEventListener('change', () => { if (sel.value) { reason.value = sel.value; update(); } });
+  const update = () => {
+    warn.textContent = '';
+    if (!reason.value.trim()) { pre.textContent = '-- 却下理由を入力してください（DBが空理由を拒絶します）'; execBtn.disabled = copyBtn.disabled = true; return; }
+    if (looksLikeMyNumber(reason.value)) warn.textContent = '⚠ 12桁の数字列(個人番号様)が含まれています。DBに拒絶されます。個人番号は絶対に転記しない。';
+    if (reason.value.includes('女性専用サービスのため')) {
+      warn.textContent += (warn.textContent ? ' ' : '') +
+        '男性判明時の義務（手順6）: 同利用者の過去の承認済み行をすべて剥奪すること（「利用者情報・他の申請を取得」で履歴確認）。アカウント停止・利用制限の判断は運営責任者へエスカレーション。';
+    }
+    pre.textContent = "select reject_identity_verification('" + row.id + "', '" + sqlEsc(reason.value.trim()) + "');";
+    execBtn.disabled = copyBtn.disabled = false;
+  };
+  reason.addEventListener('input', update);
+  copyBtn.addEventListener('click', () => copyText(pre.textContent));
+  execBtn.addEventListener('click', async () => {
+    const msg = 'この申請を却下します。\n\n'
+      + '書類: ' + (DOC_TYPES[row.document_type] || row.document_type) + '\n'
+      + '却下理由（利用者に表示・永久保存されます）:\n' + reason.value.trim()
+      + (row.status === 'approved' ? '\n\n※ 承認済み行の却下＝バッジ剥奪です。' : '')
+      + '\n\nよろしいですか？';
+    if (!confirm(msg)) return;
+    execBtn.disabled = true;
+    try {
+      await callReviewRpc(S.mode === 'admin' ? 'admin_reject_identity_verification' : 'reject_identity_verification',
+        { p_id: row.id, p_reason: reason.value.trim() });
+      toast('却下しました');
+      S.review.openId = null;
+      render();
+    } catch (e) {
+      toast('却下できませんでした: ' + e.message, true);
+      execBtn.disabled = false;
+    }
+  });
+  update();
+  if (row.status === 'approved') box.append(el('div', { class: 'warnline' }, '承認済み行の却下＝バッジ剥奪です。男性判明時は同利用者の他の承認行もすべて剥奪すること（申請履歴で確認）。'));
+  box.append(el('div', { class: 'formline' }, sel), reason, warn, pre,
+    el('div', { class: 'formline' }, execBtn, copyBtn));
+  return box;
+}
+
+// ---------- テーブル ----------
+async function ensureSwagger() {
+  if (S.swagger) return;
+  S.swagger = await apiJson('/rest/v1/', { headers: { Accept: 'application/openapi+json' } });
+  S.tables.list = Object.keys(S.swagger.definitions || {}).sort();
+}
+function tableColumns(name) {
+  const def = (S.swagger.definitions || {})[name];
+  return def ? Object.keys(def.properties || {}) : [];
+}
+
+function renderTables() {
+  const root = el('div', { class: 'layout' });
+  const side = el('div', { class: 'side' }, el('div', { class: 'placeholder' }, '読込中…'));
+  const main = el('div', null, el('div', { class: 'placeholder card' }, '左の一覧からテーブルを選択'));
+  root.append(side, main);
+  ensureSwagger().then(() => {
+    if (!alive(side)) return;
+    side.textContent = '';
+    for (const name of S.tables.list) {
+      side.append(el('button', {
+        class: 'sideitem' + (S.tables.current === name ? ' active' : ''),
+        onclick: () => {
+          Object.assign(S.tables, { current: name, offset: 0, sortCol: null, sortDir: 'asc', fCol: '', fOp: 'eq', fVal: '' });
+          render();
+        },
+      }, name));
+    }
+    if (S.tables.current) loadTableRows(main);
+  }).catch(e => { if (alive(side)) { side.textContent = ''; side.append(el('div', { class: 'placeholder' }, '取得失敗: ' + e.message)); } });
+  return root;
+}
+
+function loadTableRows(main) {
+  const t = S.tables;
+  main.textContent = '';
+  main.append(el('div', { class: 'placeholder card' }, t.current + ' を読込中…'));
+  const params = ['select=*', 'limit=' + t.limit, 'offset=' + t.offset];
+  // order 無しの limit/offset は行の重複・欠落を起こす（Postgres は順序を保証しない）ため必ず order を付ける
+  const cols0 = tableColumns(t.current);
+  const tiebreak = cols0.includes('id') ? 'id' : cols0[0];
+  if (t.sortCol) {
+    params.push('order=' + encodeURIComponent(t.sortCol) + '.' + t.sortDir +
+      (tiebreak && tiebreak !== t.sortCol ? ',' + encodeURIComponent(tiebreak) + '.asc' : ''));
+  } else if (tiebreak) {
+    params.push('order=' + encodeURIComponent(tiebreak) + '.asc');
+  }
+  if (t.fCol && t.fVal !== '') {
+    const v = t.fOp === 'ilike' ? '*' + t.fVal + '*' : t.fVal;
+    params.push(encodeURIComponent(t.fCol) + '=' + t.fOp + '.' + encodeURIComponent(v));
+  } else if (t.fCol && t.fOp === 'is') {
+    params.push(encodeURIComponent(t.fCol) + '=is.null');
+  }
+  api('/rest/v1/' + encodeURIComponent(t.current) + '?' + params.join('&'), { headers: { Prefer: 'count=exact' } })
+    .then(async res => {
+      const rows = await res.json();
+      const total = totalFromRange(res);
+      if (!alive(main)) return;
+      if (!rows.length && total > 0 && t.offset > 0) {
+        t.offset = Math.floor((total - 1) / t.limit) * t.limit;
+        loadTableRows(main);
+        return;
+      }
+      main.textContent = '';
+      const cols = tableColumns(t.current);
+      const shown = rows.length ? Object.keys(rows[0]) : cols;
+
+      // フィルタ行
+      const fCol = el('select', null, el('option', { value: '' }, '（フィルタ列）'), cols.map(c => el('option', { value: c, selected: t.fCol === c ? '' : null }, c)));
+      const fOp = el('select', null, ['eq', 'neq', 'ilike', 'gt', 'gte', 'lt', 'lte', 'is'].map(o => el('option', { value: o, selected: t.fOp === o ? '' : null }, o === 'is' ? 'is null' : o)));
+      const fVal = el('input', { type: 'text', value: t.fVal, placeholder: '値（ilike は部分一致）' });
+      const apply = () => { t.fCol = fCol.value; t.fOp = fOp.value; t.fVal = fOp.value === 'is' ? 'null' : fVal.value; t.offset = 0; loadTableRows(main); };
+      fVal.addEventListener('keydown', e => { if (e.key === 'Enter') apply(); });
+      main.append(el('div', { class: 'toolbar' },
+        el('span', { class: 'mono', style: 'font-size:14px' }, t.current),
+        el('span', { class: 'dim' }, total + ' 行'),
+        fCol, fOp, fVal,
+        el('button', { class: 'btn', onclick: apply }, '絞り込む'),
+        el('button', { class: 'btn', onclick: () => { t.fCol = ''; t.fVal = ''; t.offset = 0; loadTableRows(main); } }, '解除')));
+
+      // グリッド
+      const thead = el('tr', null, shown.map(c => el('th', {
+        class: 'sortable',
+        title: 'クリックでソート',
+        onclick: () => { t.sortDir = (t.sortCol === c && t.sortDir === 'asc') ? 'desc' : 'asc'; t.sortCol = c; loadTableRows(main); },
+      }, c + (t.sortCol === c ? (t.sortDir === 'asc' ? ' ▲' : ' ▼') : ''))));
+      const tbody = el('tbody', null, rows.map(r => el('tr', null, shown.map(c => el('td', null, cellVal(r[c]))))));
+      main.append(el('div', { class: 'gridwrap' }, el('table', { class: 'grid' }, el('thead', null, thead), tbody)));
+      if (!rows.length) main.append(el('div', { class: 'placeholder' }, '0 行'));
+
+      // ページャ
+      main.append(el('div', { class: 'pager', style: 'margin-top:10px' },
+        el('button', { class: 'btn', disabled: t.offset === 0 ? '' : null, onclick: () => { t.offset = Math.max(0, t.offset - t.limit); loadTableRows(main); } }, '前へ'),
+        el('span', null, (total ? t.offset + 1 : 0) + '–' + (t.offset + rows.length) + ' / ' + total),
+        el('button', { class: 'btn', disabled: t.offset + rows.length >= total ? '' : null, onclick: () => { t.offset += t.limit; loadTableRows(main); } }, '次へ')));
+    })
+    .catch(e => { if (alive(main)) { main.textContent = ''; main.append(el('div', { class: 'placeholder card' }, '取得失敗: ' + e.message)); } });
+}
+
+function cellVal(v) {
+  if (v === null || v === undefined) return el('span', { class: 'null' }, 'null');
+  if (typeof v === 'boolean') return el('span', { class: v ? '' : 'dim' }, String(v));
+  if (typeof v === 'object') v = JSON.stringify(v);
+  const s = String(v);
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return idSpan(s);
+  if (s.length > 120) {
+    const span = el('span', { class: 'trunc', title: 'クリックで全文表示' }, s.slice(0, 120) + '…');
+    span.addEventListener('click', () => { span.textContent = s; span.classList.remove('trunc'); }, { once: true });
+    return span;
+  }
+  return el('span', null, s);
+}
+
+// ---------- ストレージ ----------
+function renderStorage() {
+  const root = el('div', { class: 'layout' });
+  const side = el('div', { class: 'side' }, el('div', { class: 'placeholder' }, '読込中…'));
+  const main = el('div', null, el('div', { class: 'placeholder card' }, '左の一覧からバケットを選択'));
+  root.append(side, main);
+  (S.storage.buckets ? Promise.resolve(S.storage.buckets) : apiJson('/storage/v1/bucket'))
+    .then(buckets => {
+      S.storage.buckets = buckets;
+      if (!alive(side)) return;
+      side.textContent = '';
+      for (const b of buckets) {
+        side.append(el('button', {
+          class: 'sideitem' + (S.storage.bucket === b.name ? ' active' : ''),
+          onclick: () => { Object.assign(S.storage, { bucket: b.name, prefix: '', offset: 0 }); render(); },
+        }, b.name + (b.public ? '（公開）' : '')));
+      }
+      if (!buckets.length) side.append(el('div', { class: 'placeholder' }, 'バケットなし'));
+      if (S.storage.bucket) loadObjects(main);
+    })
+    .catch(e => { if (alive(side)) { side.textContent = ''; side.append(el('div', { class: 'placeholder' }, '取得失敗: ' + e.message)); } });
+  return root;
+}
+
+function loadObjects(main) {
+  const st = S.storage;
+  main.textContent = '';
+  main.append(el('div', { class: 'placeholder card' }, '読込中…'));
+  apiJson('/storage/v1/object/list/' + encodeURIComponent(st.bucket), {
+    method: 'POST',
+    body: { prefix: st.prefix, limit: st.limit, offset: st.offset, sortBy: { column: 'name', order: 'asc' } },
+  }).then(entries => {
+    if (!alive(main)) return;
+    main.textContent = '';
+
+    // パンくず
+    const crumbs = el('div', { class: 'crumbs toolbar' });
+    crumbs.append(el('a', { onclick: () => { st.prefix = ''; st.offset = 0; loadObjects(main); } }, st.bucket));
+    let acc = '';
+    for (const seg of st.prefix.split('/').filter(Boolean)) {
+      acc += seg + '/';
+      const target = acc;
+      crumbs.append(' / ', el('a', { onclick: () => { st.prefix = target; st.offset = 0; loadObjects(main); } }, seg));
+    }
+    main.append(crumbs);
+
+    const preview = el('div');
+    const tbl = el('table', { class: 'grid' },
+      el('thead', null, el('tr', null, ['名前', 'サイズ', 'MIME', '更新日時'].map(h => el('th', null, h)))));
+    const tbody = el('tbody');
+    for (const ent of entries) {
+      const isFolder = ent.id === null || ent.id === undefined;
+      const fullPath = st.prefix + ent.name;
+      const meta = ent.metadata || {};
+      const tr = el('tr', { class: 'clickable' },
+        el('td', { class: 'mono' }, (isFolder ? '📁 ' : '') + ent.name),
+        el('td', null, isFolder ? '—' : fmtSize(meta.size)),
+        el('td', { class: 'dim' }, isFolder ? '' : (meta.mimetype || '')),
+        el('td', { class: 'dim' }, isFolder ? '' : jst(ent.updated_at || ent.created_at)));
+      tr.addEventListener('click', () => {
+        if (isFolder) { st.prefix = fullPath + '/'; st.offset = 0; loadObjects(main); }
+        else showObjectPreview(preview, st.bucket, fullPath, meta);
+      });
+      tbody.append(tr);
+    }
+    tbl.append(tbody);
+    main.append(el('div', { class: 'gridwrap' }, tbl));
+    if (!entries.length) main.append(el('div', { class: 'placeholder' }, '空です'));
+    main.append(el('div', { class: 'pager', style: 'margin-top:10px' },
+      el('button', { class: 'btn', disabled: st.offset === 0 ? '' : null, onclick: () => { st.offset = Math.max(0, st.offset - st.limit); loadObjects(main); } }, '前へ'),
+      el('span', null, 'offset ' + st.offset + '（' + entries.length + ' 件表示・最大' + st.limit + '件/頁）'),
+      el('button', { class: 'btn', disabled: entries.length < st.limit ? '' : null, onclick: () => { st.offset += st.limit; loadObjects(main); } }, '次へ')));
+    main.append(preview);
+  }).catch(e => { if (alive(main)) { main.textContent = ''; main.append(el('div', { class: 'placeholder card' }, '取得失敗: ' + e.message)); } });
+}
+
+function fmtSize(n) {
+  if (n === null || n === undefined) return '—';
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1048576).toFixed(2) + ' MB';
+}
+
+function showObjectPreview(box, bucket, path, meta) {
+  box.textContent = '';
+  const card = el('div', { class: 'card', style: 'margin-top:12px;padding:12px' },
+    el('div', { class: 'imgpath mono trunc', title: 'クリックでパスをコピー', onclick: () => copyText(path) }, bucket + '/' + path),
+    el('div', { class: 'dim', style: 'font-size:12px' }, fmtSize(meta.size) + '　' + (meta.mimetype || '不明')));
+  box.append(card);
+  if ((meta.mimetype || '').startsWith('image/')) {
+    const holder = el('div', { class: 'imgholder', style: 'margin-top:8px' }, '読込中…');
+    card.append(holder);
+    fetchObjectUrl(bucket, path).then(u => {
+      if (!alive(holder)) return;
+      holder.textContent = '';
+      holder.append(el('img', { src: u, alt: path, onclick: () => openLightbox(u, bucket + '/' + path) }));
+    }).catch(e => { if (alive(holder)) { holder.classList.add('err'); holder.textContent = '取得失敗: ' + e.message; } });
+  } else {
+    card.append(el('div', { class: 'dim', style: 'margin-top:8px;font-size:12px' }, '画像以外のためプレビューなし（読み取り専用のためダウンロード機能はありません）'));
+  }
+}
+
+// ---------- ユーザー ----------
+function renderUsers() {
+  const root = el('div');
+  const bar = el('div', { class: 'toolbar' });
+  const box = el('div', { class: 'card' }, el('div', { class: 'placeholder' }, '読込中…'));
+  root.append(bar, box);
+  const u = S.users;
+  apiJson('/auth/v1/admin/users?page=' + u.page + '&per_page=' + u.perPage)
+    .then(j => {
+      if (!alive(root)) return;
+      const users = j.users || j || [];
+      const filter = el('input', { type: 'text', value: u.filter, placeholder: 'このページ内をメール/IDで絞り込み', style: 'min-width:260px' });
+      filter.addEventListener('input', () => { u.filter = filter.value; drawRows(); });
+      bar.append(filter,
+        el('span', { class: 'pager', style: 'margin-left:auto' },
+          el('button', { class: 'btn', disabled: u.page <= 1 ? '' : null, onclick: () => { u.page--; render(); } }, '前へ'),
+          el('span', null, u.page + ' ページ目'),
+          el('button', { class: 'btn', disabled: users.length < u.perPage ? '' : null, onclick: () => { u.page++; render(); } }, '次へ')));
+      const drawRows = () => {
+        const q = u.filter.trim().toLowerCase();
+        const list = q ? users.filter(x => (x.email || '').toLowerCase().includes(q) || String(x.id).includes(q)) : users;
+        box.textContent = '';
+        const tbl = el('table', { class: 'grid' },
+          el('thead', null, el('tr', null, ['メール', 'ID', '登録日時', '最終ログイン', '認証方式', 'BAN', ''].map(h => el('th', null, h)))),
+          el('tbody', null, list.map(x => el('tr', null,
+            el('td', null, x.email || el('span', { class: 'null' }, '（匿名）')),
+            el('td', null, idSpan(x.id)),
+            el('td', { class: 'dim' }, jst(x.created_at)),
+            el('td', { class: 'dim' }, jst(x.last_sign_in_at)),
+            el('td', { class: 'dim' }, ((x.app_metadata || {}).providers || [(x.app_metadata || {}).provider]).filter(Boolean).join(', ')),
+            el('td', null, x.banned_until ? el('span', { class: 'badge bad' }, jst(x.banned_until) + ' まで') : '—'),
+            el('td', null, el('button', {
+              class: 'btn', style: 'padding:1px 8px;font-size:12px',
+              onclick: () => { S.review.userFilter = x.id; S.review.status = 'all'; S.review.offset = 0; S.tab = 'review'; render(); },
+            }, '本人確認履歴'))))));
+        box.append(el('div', { class: 'gridwrap', style: 'border:none' }, tbl));
+        if (!list.length) box.append(el('div', { class: 'placeholder' }, '該当なし'));
+      };
+      drawRows();
+    })
+    .catch(e => { if (alive(box)) { box.textContent = ''; box.append(el('div', { class: 'placeholder' }, '取得失敗: ' + e.message)); } });
+  return root;
+}
+
+// ---------- ライトボックス ----------
+const lb = { rot: 0 };
+function openLightbox(url, caption) {
+  const img = document.getElementById('lbImg');
+  lb.rot = 0;
+  img.src = url;
+  img.className = 'fit';
+  img.style.transform = '';
+  document.getElementById('lbCap').textContent = caption;
+  document.getElementById('lightbox').classList.add('open');
+}
+function closeLightbox() { document.getElementById('lightbox').classList.remove('open'); }
+document.getElementById('lbClose').addEventListener('click', closeLightbox);
+document.getElementById('lightbox').addEventListener('click', e => { if (e.target.id === 'lightbox' || e.target.classList.contains('lbview')) closeLightbox(); });
+document.getElementById('lbRotate').addEventListener('click', () => {
+  lb.rot = (lb.rot + 90) % 360;
+  document.getElementById('lbImg').style.transform = 'rotate(' + lb.rot + 'deg)';
+});
+document.getElementById('lbFit').addEventListener('click', () => document.getElementById('lbImg').classList.toggle('fit'));
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
+
+// ---------- ルーティング ----------
+function render() {
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === S.tab));
+  const v = document.getElementById('view');
+  v.textContent = '';
+  if (!S.key) { v.append(renderConnect()); return; }
+  if (S.mode === 'admin' && S.tab !== 'review') {
+    v.append(el('div', { class: 'placeholder card' },
+      'このタブは service_role 接続時のみ利用できます（管理者ログインは審査キュー専用です）'));
+    return;
+  }
+  if (S.tab === 'review') v.append(renderReview());
+  else if (S.tab === 'tables') v.append(renderTables());
+  else if (S.tab === 'storage') v.append(renderStorage());
+  else if (S.tab === 'users') v.append(renderUsers());
+}
+document.querySelectorAll('nav button').forEach(b =>
+  b.addEventListener('click', () => { S.tab = b.dataset.tab; render(); }));
+document.getElementById('disconnBtn').addEventListener('click', disconnect);
+
+// 起動: sessionStorage に接続情報があれば復元
+try {
+  const saved = sessionStorage.getItem(SS_KEY);
+  if (saved) {
+    const s = JSON.parse(saved);
+    S.url = s.url; S.key = s.key;
+    S.mode = s.mode || 'service';
+    S.refreshToken = s.refreshToken || '';
+    S.persist = true;
+  }
+} catch (e) { /* 壊れた保存値は無視 */ }
+updateConnUI();
+render();
+</script>
+</body>
+</html>
