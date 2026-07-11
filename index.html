@@ -3,6 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 多層防御: 万一XSSが混入しても、鍵・要配慮画像の外部持ち出し（connect-src）と
+     外部リソース読込を遮断する。通信先は Supabase ホストに限定し、画像は
+     同一オリジン/blob のみ、外部スクリプト・スタイル・埋め込みは全て禁止する。
+     このページはインライン <script>/<style> のみで動くため *-src は 'unsafe-inline'。 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src https://*.supabase.co; img-src 'self' blob: data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <meta name="theme-color" content="#14161a">
 <title>Amicuna 運営ビューア（閲覧＋審査）</title>
 <style>
@@ -134,6 +139,7 @@
   <h1>Amicuna 運営ビューア<span class="ro">閲覧＋審査</span></h1>
   <nav>
     <button data-tab="review">審査キュー</button>
+    <button data-tab="reports">通報審査</button>
     <button data-tab="tables">テーブル</button>
     <button data-tab="storage">ストレージ</button>
     <button data-tab="users">ユーザー</button>
@@ -155,10 +161,10 @@
 
 <script>
 'use strict';
-/* Amicuna 運営ビューア — Supabase 閲覧＋本人確認審査ダッシュボード
+/* Amicuna 運営ビューア — Supabase 閲覧＋本人確認・通報審査ダッシュボード
  * 依存ゼロの単一ファイル。Supabase の REST(PostgREST) / Storage / Auth Admin API を
- * fetch で直接叩く。書き込みは本人確認の審査RPC（approve/reject）2本のみを許可し、
- * それ以外の更新・削除・INSERT はコード上のガードで遮断している。
+ * fetch で直接叩く。書き込みは審査RPC（本人確認の approve/reject と通報の review）
+ * のみを許可し、それ以外の更新・削除・INSERT はコード上のガードで遮断している。
  * 審査手順の正本は supabase/IDENTITY_REVIEW_OPS.md。 */
 
 // ---------- 定数（スキーマは supabase/migrations/ の定義に一致させること） ----------
@@ -193,6 +199,21 @@ const GENDER_RULE = {
   residenceCard: '性別欄が必ずある。券面どおり。female のみ承認可（male は却下・notListed はDBが拒絶）。',
   specialPermanentResident: '性別欄が必ずある。券面どおり。female のみ承認可（male は却下・notListed はDBが拒絶）。',
 };
+// 通報審査（reports）: 理由・ステータスのラベル（lib/models/report_model.dart と一致させること）
+const REPORT_REASONS = {
+  falseClaim: '虚偽申告',
+  falseIdentity: 'なりすまし',
+  inappropriateMessage: '不適切メッセージ',
+  fraud: '詐欺・金銭要求',
+  minorContact: '未成年関与',
+  spam: 'スパム',
+  other: 'その他',
+};
+const REPORT_STATUS_LABEL = {
+  pending: '審査待ち', reviewing: '対応中',
+  resolved: '対応済み', dismissed: '却下', accountSuspended: 'アカウント停止相当',
+};
+const REPORT_CLOSED = ['resolved', 'dismissed', 'accountSuspended']; // 終端（以後変更不可）
 const REJECT_TEMPLATES = [
   ['画像不鮮明', '画像が不鮮明です。書類全面が写るよう撮り直してください。'],
   ['自撮りと別人の疑い', 'ご提出いただいた自撮り画像が、書類の顔写真とご本人であることを確認できませんでした。恐れ入りますが再度お顔がはっきり写る状態で撮影のうえ、再提出をお願いいたします。'],
@@ -204,10 +225,10 @@ const CHECKLIST = [
   '書類が対象5種（免許証 / 経歴証明書 / マイナンバーカード表面 / 在留カード / 特別永住者証明書）のいずれか',
   '画像の書類種別が行の document_type と一致（不一致は「書類の種類の選択が誤っています…」で却下）',
   '生年月日が審査日時点で満20年以上前・書類が有効期限内',
-  '性別の転記根拠を確認（券面 or 免許証系は自撮りとの目視照合）',
+  '性別の転記根拠を確認（券面の性別欄 or 免許証系は自撮りとの顔照合）',
   '画像が鮮明で、画面の再撮影・加工・合成の痕跡がない',
   'document_path の先頭フォルダが user_id と一致（不一致は即通報扱い）',
-  'selfie_path の自撮りが書類の顔写真と同一人物に見える（2026-07-10以前の旧行は selfie 無し）',
+  'face_match_score が 0.5 以上（0.5未満はDBが承認を拒否）。⚠ スコアは端末側の自己申告値であり合格証ではない — スコアの有無に関わらず、承認前に必ず自撮りと書類の顔写真を目視でも照合する（2026-07-10以前の旧行は selfie 無し）',
 ];
 
 // ---------- 状態 ----------
@@ -218,6 +239,7 @@ const S = {
   tab: 'review',
   swagger: null,
   review: { status: 'pending', userFilter: '', offset: 0, limit: 25, openId: null },
+  reports: { status: 'pending', offset: 0, limit: 25, openId: null },
   tables: { list: [], current: null, offset: 0, limit: 50, sortCol: null, sortDir: 'asc', fCol: '', fOp: 'eq', fVal: '' },
   storage: { buckets: null, bucket: null, prefix: '', offset: 0, limit: 200 },
   users: { page: 1, perPage: 50, filter: '' },
@@ -225,10 +247,11 @@ const S = {
 
 // ---------- API（書き込みガード付き） ----------
 // ponytail: service_role を使うため技術的には何でも書けてしまう。
-// このガードが唯一の保証線 — 許可する書き込みは審査RPC 2本と Storage の list(POST) だけ。
+// このガードが唯一の保証線 — 許可する書き込みは下記の審査RPCと Storage の list(POST) だけ。
 const REVIEW_RPCS = [
-  'approve_identity_verification', 'reject_identity_verification',           // serviceモード
-  'admin_approve_identity_verification', 'admin_reject_identity_verification', // adminモード（管理者ラッパ）
+  'approve_identity_verification', 'reject_identity_verification', 'review_report', // serviceモード
+  'admin_approve_identity_verification', 'admin_reject_identity_verification',      // adminモード（管理者ラッパ）
+  'admin_review_report',
 ];
 function assertAllowed(method, path) {
   const m = method.toUpperCase();
@@ -291,6 +314,10 @@ async function refreshSession() {
 }
 function persistSession() {
   if (!S.persist) return;
+  // service_role キー（RLSを全バイパスする全権キー）は sessionStorage に保存しない。
+  // 永続化は、権限が審査のみに限定され漏えい時もパスワード変更で即失効できる
+  // 管理者ログイン（admin: access/refresh トークン）にのみ許可する。
+  if (S.mode !== 'admin') return;
   sessionStorage.setItem(SS_KEY, JSON.stringify({ url: S.url, mode: S.mode, key: S.key, refreshToken: S.refreshToken }));
 }
 
@@ -486,9 +513,9 @@ function renderConnect() {
   return el('div', { class: 'connform' },
     el('h2', { style: 'margin:0 0 8px;font-size:16px' }, 'Amicuna 運営ログイン'),
     el('p', { class: 'dim', style: 'font-size:13px;margin:0' },
-      '本人確認の目視審査（承認・却下）とデータ確認のための運営ツールです。このツールが行う書き込みは審査RPCのみで、それ以外の更新・削除・INSERT はコード内ガードで遮断されます。'),
+      '本人確認の目視審査（承認・却下）・通報審査とデータ確認のための運営ツールです。このツールが行う書き込みは審査RPCのみで、それ以外の更新・削除・INSERT はコード内ガードで遮断されます。'),
     el('label', null, 'プロジェクト URL'), url,
-    el('label', null, '管理者アカウント（スマホ・PC共通。審査キューが使えます）'),
+    el('label', null, '管理者アカウント（スマホ・PC共通。審査キュー・通報審査が使えます）'),
     email, pass,
     el('label', { style: 'display:flex;gap:6px;align-items:center' }, save, 'このタブを閉じるまで記憶する（sessionStorage）'),
     loginBtn,
@@ -863,6 +890,213 @@ function buildRejectSql(row) {
   return box;
 }
 
+// ---------- 通報審査 ----------
+function reportStatusBadge(st) {
+  const cls = { pending: 'warn', reviewing: 'grey', resolved: 'good', dismissed: 'grey', accountSuspended: 'bad' }[st] || 'grey';
+  return el('span', { class: 'badge ' + cls }, REPORT_STATUS_LABEL[st] || st);
+}
+function urgentBadge() {
+  return el('span', { class: 'badge bad', title: '緊急トリアージ（priority=1: 詐欺・金銭要求 / 未成年関与）' }, '🚨 緊急');
+}
+
+// 一覧＋件数の取得。serviceモードは PostgREST 直、adminモードは管理者RPC（GET）経由。
+// 'closed' は終端3種（resolved / dismissed / accountSuspended）のグループ指定。
+async function fetchReportsPage() {
+  const r = S.reports;
+  const stFilter = r.status === 'all' ? null : r.status;
+  if (S.mode === 'admin') {
+    const cnt = st => apiJson('/rest/v1/rpc/admin_count_reports?' + rpcQuery({ p_status: st }));
+    const [pending, reviewing, closed, rows] = await Promise.all([
+      cnt('pending'), cnt('reviewing'), cnt('closed'),
+      apiJson('/rest/v1/rpc/admin_list_reports?' +
+        rpcQuery({ p_status: stFilter, p_limit: r.limit, p_offset: r.offset })),
+    ]);
+    const counts = { pending, reviewing, closed };
+    const total = stFilter ? counts[stFilter] : pending + reviewing + closed;
+    return { counts, rows, total };
+  }
+  const closedQ = 'status=in.(' + REPORT_CLOSED.join(',') + ')';
+  const q = stFilter === 'closed' ? '&' + closedQ : (stFilter ? '&status=eq.' + stFilter : '');
+  const [pending, reviewing, closed, rowsRes] = await Promise.all([
+    countRows('reports', 'status=eq.pending'),
+    countRows('reports', 'status=eq.reviewing'),
+    countRows('reports', closedQ),
+    api('/rest/v1/reports?select=*&order=priority.desc,reported_at.asc,id.asc&limit=' + r.limit +
+      '&offset=' + r.offset + q, { headers: { Prefer: 'count=exact' } }),
+  ]);
+  return { counts: { pending, reviewing, closed }, rows: await rowsRes.json(), total: totalFromRange(rowsRes) };
+}
+
+function renderReports() {
+  const root = el('div');
+  root.append(el('div', { class: 'callout info' },
+    el('b', null, '通報審査: '),
+    '終端（対応済み・却下・アカウント停止相当）は確定後変更できません。全遷移は report_audits に自動記録されます。'
+    + '実際のアカウント停止（BAN）はこのビューアでは行えません — Studio の運営責任者へエスカレーションしてください。'));
+
+  const chips = el('div', { class: 'toolbar' });
+  const listBox = el('div', { class: 'card' }, el('div', { class: 'placeholder' }, '読込中…'));
+  const pager = el('div', { class: 'pager' });
+  root.append(chips, listBox, pager);
+
+  (async () => {
+    try {
+      const { counts, rows, total } = await fetchReportsPage();
+      if (!alive(root)) return;
+      // 他所の審査でキューが縮んで offset が総件数を超えたら最終ページへ戻す
+      if (!rows.length && total > 0 && S.reports.offset > 0) {
+        S.reports.offset = Math.floor((total - 1) / S.reports.limit) * S.reports.limit;
+        render();
+        return;
+      }
+      const all = counts.pending + counts.reviewing + counts.closed;
+
+      // ステータスチップ
+      chips.textContent = '';
+      const defs = [
+        ['pending', '審査待ち', counts.pending],
+        ['reviewing', '対応中', counts.reviewing],
+        ['closed', '終端（対応済み・却下・停止）', counts.closed],
+        ['all', 'すべて', all],
+      ];
+      for (const [st, label, n] of defs) {
+        chips.append(el('button', {
+          class: 'chip' + (S.reports.status === st ? ' active' : ''),
+          onclick: () => { S.reports.status = st; S.reports.offset = 0; S.reports.openId = null; render(); },
+        }, label + ' ' + n));
+      }
+      chips.append(el('button', { class: 'btn', style: 'margin-left:auto', onclick: () => render() }, '再読込'));
+
+      // 一覧
+      listBox.textContent = '';
+      if (!rows.length) listBox.append(el('div', { class: 'placeholder' }, '該当する通報はありません'));
+      for (const row of rows) listBox.append(buildReportRow(row));
+
+      // ページャ
+      pager.textContent = '';
+      const from = total ? S.reports.offset + 1 : 0;
+      const to = S.reports.offset + rows.length;
+      pager.append(
+        el('button', { class: 'btn', disabled: S.reports.offset === 0 ? '' : null, onclick: () => { S.reports.offset = Math.max(0, S.reports.offset - S.reports.limit); render(); } }, '前へ'),
+        el('span', null, from + '–' + to + ' / ' + total + ' 件（緊急優先・通報日時の古い順）'),
+        el('button', { class: 'btn', disabled: to >= total ? '' : null, onclick: () => { S.reports.offset += S.reports.limit; render(); } }, '次へ'));
+    } catch (e) {
+      if (alive(root)) { listBox.textContent = ''; listBox.append(el('div', { class: 'placeholder' }, '読込失敗: ' + e.message)); }
+    }
+  })();
+  return root;
+}
+
+function buildReportRow(row) {
+  const card = el('div', { class: 'card' });
+  const head = el('div', { class: 'rowcard' },
+    reportStatusBadge(row.status),
+    row.priority === 1 ? urgentBadge() : null,
+    el('span', null, REPORT_REASONS[row.reason] || row.reason),
+    el('span', { class: 'dim' }, '通報 ' + jst(row.reported_at)),
+    el('span', { class: 'dim' }, '被通報者 ', idSpan(row.reported_user_id),
+      row.reported_nickname ? '（' + row.reported_nickname + '）' : ''),
+  );
+  head.addEventListener('click', () => {
+    const open = card.querySelector('.detail');
+    if (open) { open.remove(); S.reports.openId = null; }
+    else { S.reports.openId = row.id; card.append(buildReportDetail(row)); }
+  });
+  card.append(head);
+  if (S.reports.openId === row.id) card.append(buildReportDetail(row));
+  return card;
+}
+
+function buildReportDetail(row) {
+  const d = el('div', { class: 'detail', onclick: e => e.stopPropagation() });
+
+  // 左: 通報内容の全文（利用者入力。el() のテキストノード挿入なのでエスケープ不要＝XSS安全）
+  const left = el('div', null,
+    el('div', { class: 'imglabel' }, '通報内容の詳細（利用者入力・全文）'),
+    el('div', { style: 'white-space:pre-wrap;word-break:break-word;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px 12px;font-size:13px' },
+      row.details || el('span', { class: 'null' }, '（詳細の記入なし）')));
+
+  // 右: 通報の事実関係
+  const facts = el('dl', { class: 'facts' },
+    el('dt', null, '通報ID'), el('dd', null, idSpan(row.id)),
+    el('dt', null, '理由'), el('dd', null, (REPORT_REASONS[row.reason] || row.reason) + ' (' + row.reason + ')',
+      row.priority === 1 ? el('span', null, ' ', urgentBadge()) : null),
+    el('dt', null, 'ステータス'), el('dd', null, reportStatusBadge(row.status)),
+    el('dt', null, '通報者ID'), el('dd', null, idSpan(row.reporter_user_id)),
+    el('dt', null, '被通報者ID'), el('dd', null, idSpan(row.reported_user_id)),
+    el('dt', null, '被通報者の表示名'), el('dd', null, row.reported_nickname || el('span', { class: 'null' }, 'なし')),
+    el('dt', null, '通報日時'), el('dd', null, jst(row.reported_at)),
+    el('dt', null, '利用者通報'), el('dd', { class: 'dim' }, row.is_self_reported ? 'はい（アプリからの通報）' : 'いいえ（システム・運営起票）'),
+    el('dt', null, '審査日時'), el('dd', null, jst(row.reviewed_at)),
+    el('dt', null, '処理メモ'), el('dd', null, row.review_note || el('span', { class: 'null' }, 'なし')),
+  );
+
+  // 下段: 審査操作（終端は操作不可）
+  const bottom = el('div', { class: 'full' });
+  if (REPORT_CLOSED.includes(row.status)) {
+    bottom.append(el('div', { class: 'dim', style: 'font-size:12px' },
+      '確定済み（' + (REPORT_STATUS_LABEL[row.status] || row.status) + '）のため変更できません。遷移履歴は report_audits（テーブルタブ・service接続）で確認できます。'));
+  } else {
+    bottom.append(buildReportActions(row));
+  }
+
+  d.append(left, el('div', null, facts), bottom);
+  return d;
+}
+
+function buildReportActions(row) {
+  const box = el('div', { class: 'sqlbox' });
+  box.append(el('h4', null, '審査操作'),
+    el('div', { class: 'dim', style: 'font-size:12px' },
+      '対応済み・却下・アカウント停止相当は確定＝以後変更不可（処理メモ必須・利用者には表示されません）。'
+      + 'アカウント停止相当は記録のみ — 実際のBANは Studio の運営責任者が行います。'));
+  const note = el('textarea', { rows: '2', style: 'width:100%;margin-top:6px', maxlength: '500',
+    placeholder: '処理メモ（確定時は必須）。個人番号・氏名・住所を絶対に書かない' });
+  const warn = el('div', { class: 'warnline' });
+  note.addEventListener('input', () => {
+    warn.textContent = looksLikeMyNumber(note.value)
+      ? '⚠ 12桁の数字列（個人番号様）が含まれています。メモへの転記は禁止です。' : '';
+  });
+  const btnRow = el('div', { class: 'formline' });
+  const actions = [
+    ['reviewing', '対応中にする', 'btn'],
+    ['resolved', '対応済みで確定', 'btn primary'],
+    ['dismissed', '却下で確定', 'btn'],
+    ['accountSuspended', 'アカウント停止相当で確定', 'btn'],
+  ];
+  for (const [st, label, cls] of actions) {
+    if (st === 'reviewing' && row.status !== 'pending') continue; // reviewing→reviewing はDBが拒絶
+    const b = el('button', { class: cls }, label);
+    b.addEventListener('click', async () => {
+      const noteVal = note.value.trim();
+      if (st !== 'reviewing' && !noteVal) { toast('確定には処理メモの入力が必須です', true); note.focus(); return; }
+      if (looksLikeMyNumber(noteVal)) { toast('個人番号と誤認しうる12桁の数字列はメモに記入できません', true); return; }
+      const msg = 'この通報を「' + REPORT_STATUS_LABEL[st] + '」にします。\n\n'
+        + '理由: ' + (REPORT_REASONS[row.reason] || row.reason) + '\n'
+        + '被通報者: ' + row.reported_user_id + (row.reported_nickname ? '（' + row.reported_nickname + '）' : '')
+        + (noteVal ? '\n処理メモ: ' + noteVal : '')
+        + (st === 'accountSuspended' ? '\n\n※ 記録のみです。実際のBANは Studio で別途実行してください。' : '')
+        + (st !== 'reviewing' ? '\n\n※ 確定後はこの通報を変更できません。' : '')
+        + '\n\nよろしいですか？';
+      if (!confirm(msg)) return;
+      b.disabled = true;
+      try {
+        await callReviewRpc(S.mode === 'admin' ? 'admin_review_report' : 'review_report',
+          { p_id: row.id, p_status: st, p_note: noteVal });
+        toast('通報を「' + REPORT_STATUS_LABEL[st] + '」にしました');
+        S.reports.openId = null;
+        render();
+      } catch (e) {
+        toast('更新できませんでした: ' + e.message, true);
+        b.disabled = false;
+      }
+    });
+    btnRow.append(b);
+  }
+  box.append(note, warn, btnRow);
+  return box;
+}
+
 // ---------- テーブル ----------
 async function ensureSwagger() {
   if (S.swagger) return;
@@ -1149,12 +1383,13 @@ function render() {
   const v = document.getElementById('view');
   v.textContent = '';
   if (!S.key) { v.append(renderConnect()); return; }
-  if (S.mode === 'admin' && S.tab !== 'review') {
+  if (S.mode === 'admin' && S.tab !== 'review' && S.tab !== 'reports') {
     v.append(el('div', { class: 'placeholder card' },
-      'このタブは service_role 接続時のみ利用できます（管理者ログインは審査キュー専用です）'));
+      'このタブは service_role 接続時のみ利用できます（管理者ログインは審査キュー・通報審査専用です）'));
     return;
   }
   if (S.tab === 'review') v.append(renderReview());
+  else if (S.tab === 'reports') v.append(renderReports());
   else if (S.tab === 'tables') v.append(renderTables());
   else if (S.tab === 'storage') v.append(renderStorage());
   else if (S.tab === 'users') v.append(renderUsers());
@@ -1163,15 +1398,21 @@ document.querySelectorAll('nav button').forEach(b =>
   b.addEventListener('click', () => { S.tab = b.dataset.tab; render(); }));
 document.getElementById('disconnBtn').addEventListener('click', disconnect);
 
-// 起動: sessionStorage に接続情報があれば復元
+// 起動: sessionStorage に接続情報があれば復元（管理者ログインのみ）。
+// service_role モードは永続化しない方針のため、旧仕様で保存された service キーが
+// 残っていても復元せず破棄する（全権キーをストレージに留めない）。
 try {
   const saved = sessionStorage.getItem(SS_KEY);
   if (saved) {
     const s = JSON.parse(saved);
-    S.url = s.url; S.key = s.key;
-    S.mode = s.mode || 'service';
-    S.refreshToken = s.refreshToken || '';
-    S.persist = true;
+    if (s.mode === 'admin' && s.key) {
+      S.url = s.url; S.key = s.key;
+      S.mode = 'admin';
+      S.refreshToken = s.refreshToken || '';
+      S.persist = true;
+    } else {
+      sessionStorage.removeItem(SS_KEY);
+    }
   }
 } catch (e) { /* 壊れた保存値は無視 */ }
 updateConnUI();
