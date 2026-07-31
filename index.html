@@ -6,8 +6,10 @@
 <!-- 多層防御: 万一XSSが混入しても、鍵・要配慮画像の外部持ち出し（connect-src）と
      外部リソース読込を遮断する。通信先は Supabase ホストに限定し、画像は
      同一オリジン/blob のみ、外部スクリプト・スタイル・埋め込みは全て禁止する。
-     このページはインライン <script>/<style> のみで動くため *-src は 'unsafe-inline'。 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src https://*.supabase.co; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+     このページはインライン <script>/<style> のみで動くため *-src は 'unsafe-inline'。
+     worker-src 'self' のみ例外: 運営ビューアへのブラウザPush通知
+     （admin-push-sw.js、同一オリジンのService Workerのみ許可。外部CDNは不可）。 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src https://*.supabase.co; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; worker-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="theme-color" content="#14161a">
 <title>Amicuna 運営ビューア（閲覧＋審査）</title>
 <style>
@@ -145,7 +147,7 @@
     <button data-tab="storage">ストレージ</button>
     <button data-tab="users">ユーザー</button>
   </nav>
-  <div id="conn"><span class="dot"></span><span id="connText">未接続</span><button class="btn" id="disconnBtn" style="display:none">切断</button></div>
+  <div id="conn"><span class="dot"></span><span id="connText">未接続</span><button class="btn" id="pushToggleBtn" style="display:none"></button><button class="btn" id="disconnBtn" style="display:none">切断</button></div>
 </header>
 <main id="view"></main>
 
@@ -173,16 +175,25 @@
 const DEFAULT_URL = 'https://jtdetpmorgihuzqkayni.supabase.co';
 // 公開可能キー（lib/utils/supabase_config.dart と同一値。RLS前提で公開配布してよいキー）
 const PUBLISHABLE_KEY = 'sb_publishable_3acCV-N2wUfDGhN6A72D1Q_-99vpH6O';
+// ブラウザPush通知（Web Push/VAPID）用の公開鍵。秘密鍵は
+// supabase/functions/push-admin-notify のFunction Secret側にのみ置く（公開鍵は
+// ブラウザに配布して問題ない値）
+const PUSH_VAPID_PUBLIC_KEY = 'BF7bC05LUQPXHFC_xUzKdz8K_tVTd7zWRgC3fTI4eyyUREfL4wzLoGya7eU3lgGZ5mXw54jKYP6R-q2YBatWTVM';
 const SS_KEY = 'amicuna_sb_viewer';
 const DOC_BUCKET = 'identity-docs';
 
-// 在留カード・特別永住者証明書は2026-07-15、運転免許証・運転経歴証明書と
-// パスポートは2026-07-16に受付終了（migrations/20260715000001, 20260716000001,
-// 20260716000002）。過去データの表示（履歴・監査ログ）のためラベルのみ残す。
-// GENDER_OPTIONS/GENDER_RULE からは除外し、承認フォーム自体を出さない（DBのCHECK
-// 制約が新規INSERT/UPDATEを拒否するため、承認を試みても必ず失敗する）。受付終了
-// バナーの表示機能自体は未検証のため見送り（承認を試みればDBのCHECK制約がそのまま
-// エラーを返す）
+// 在留カード・特別永住者証明書は2026-07-15に受付終了（migrations/20260715000001）。
+// 廃止書類の過去データの表示（履歴・監査ログ）のためラベルのみ残す。
+// GENDER_OPTIONS/GENDER_RULE からは除外し、承認フォーム自体を出さない
+// （DBのCHECK制約が新規INSERT/UPDATEを拒否するため、承認を試みても必ず失敗する）。
+// 受付終了バナーの表示機能自体は未検証のため見送り
+// （承認を試みればDBのCHECK制約がそのままエラーを返す）
+//
+// 運転免許証・運転経歴証明書は2026-07-16に受付終了したが2026-07-30に再開した
+// （20260716000001 → 20260730000004）。性別欄が無いため、女性確認は自撮りと
+// 書類の顔写真を見比べる目視照合のみが根拠（IDENTITY_REVIEW_OPS.md参照）。
+// パスポートは2026-07-16に一度受付終了したが2026-07-28に受付を再開した
+// （20260716000002 → 20260728000001）。
 const DOC_TYPES = {
   myNumberCard: 'マイナンバーカード',
   passport: 'パスポート',
@@ -196,9 +207,15 @@ const GENDER_LABEL = { female: '女性 (female)', male: '男性 (male)', notList
 // 承認SQLで選択できる転記性別（IDENTITY_REVIEW_OPS.md の真理表。male はどの書類でも承認不可）
 const GENDER_OPTIONS = {
   myNumberCard: ['female', 'notListed'],
+  passport: ['female', 'notListed'],
+  driversLicense: ['female', 'notListed'],
+  drivingHistoryCertificate: ['female', 'notListed'],
 };
 const GENDER_RULE = {
   myNumberCard: '券面どおりに転記。次期券面（性別欄なし）は notListed。男性の券面は承認不可＝却下。',
+  passport: '券面の性別欄（M/F）どおりに転記。判別できなければ notListed。男性の券面は承認不可＝却下。',
+  driversLicense: '性別欄なし。自撮りと書類の顔写真を見比べ、女性と判断できる場合のみ female、判断に迷えば notListed。男性と思われる場合は承認せず却下（手順6参照）。',
+  drivingHistoryCertificate: '性別欄なし。自撮りと書類の顔写真を見比べ、女性と判断できる場合のみ female、判断に迷えば notListed。男性と思われる場合は承認せず却下（手順6参照）。',
 };
 // 通報審査（reports）: 理由・ステータスのラベル（lib/models/report_model.dart と一致させること）
 const REPORT_REASONS = {
@@ -245,6 +262,7 @@ const S = {
   tables: { list: [], current: null, offset: 0, limit: 50, sortCol: null, sortDir: 'asc', fCol: '', fOp: 'eq', fVal: '' },
   storage: { buckets: null, bucket: null, prefix: '', offset: 0, limit: 200 },
   users: { page: 1, perPage: 50, filter: '' },
+  push: { subscribed: false }, // ブラウザPush通知の現在の購読状態（UI表示用のキャッシュ）
 };
 
 // ---------- API（書き込みガード付き） ----------
@@ -256,6 +274,8 @@ const REVIEW_RPCS = [
   'admin_review_report',
   // ペナルティ（20260718000006・service/admin両モード共通。処分メモ必須はDB側が強制）
   'admin_set_user_ban', 'admin_unban_user', 'admin_force_delete_user',
+  // ブラウザPush通知の購読登録・解除（20260731000002・is_admin()がDB側で強制）
+  'register_admin_push_subscription', 'unregister_admin_push_subscription',
 ];
 function assertAllowed(method, path) {
   const m = method.toUpperCase();
@@ -290,6 +310,62 @@ async function api(path, opts = {}) {
 const apiJson = async (path, opts) => (await api(path, opts)).json();
 // 審査RPCの実行。エラー時はDBトリガーの RAISE メッセージがそのまま例外メッセージに載る
 const callReviewRpc = (fn, args) => api('/rest/v1/rpc/' + fn, { method: 'POST', body: args });
+
+// ---------- ブラウザPush通知（Web Push/VAPID。管理者ログインのみ対応） ----------
+// Service WorkerはSecure Context（https または localhost）でのみ登録できる。
+// file:// で開いた場合や service モード（service_roleキー直接接続）では未対応。
+function urlBase64ToUint8Array(base64) {
+  const padding = '='.repeat((4 - (base64.length % 4)) % 4);
+  const base64safe = (base64 + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64safe);
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+async function getPushSubscription() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null;
+  // 引数なし = 現在のページURLに一致するスコープの登録を返す
+  // （このページでは admin-push-sw.js 以外のService Workerを使わない前提）
+  const reg = await navigator.serviceWorker.getRegistration();
+  if (!reg) return null;
+  return reg.pushManager.getSubscription();
+}
+// ログイン成功時・セッション復元時に1度呼び、現在の購読状態をS.pushへ反映する
+async function refreshPushUiState() {
+  try {
+    const sub = await getPushSubscription();
+    S.push.subscribed = !!sub;
+  } catch (e) {
+    S.push.subscribed = false;
+  }
+}
+async function enablePushNotifications() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    toast('このブラウザはプッシュ通知に対応していません'); return;
+  }
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') { toast('通知が許可されませんでした'); return; }
+  const reg = await navigator.serviceWorker.register('./admin-push-sw.js');
+  const sub = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(PUSH_VAPID_PUBLIC_KEY),
+  });
+  const j = sub.toJSON();
+  await callReviewRpc('register_admin_push_subscription', {
+    p_endpoint: j.endpoint, p_p256dh: j.keys.p256dh, p_auth: j.keys.auth,
+  });
+  S.push.subscribed = true;
+  toast('プッシュ通知を有効にしました');
+  render();
+}
+async function disablePushNotifications() {
+  const sub = await getPushSubscription();
+  if (sub) {
+    await callReviewRpc('unregister_admin_push_subscription', { p_endpoint: sub.endpoint });
+    await sub.unsubscribe();
+  }
+  S.push.subscribed = false;
+  toast('プッシュ通知を無効にしました');
+  render();
+}
 
 // ---------- 利用者ID（member_id）検索 ----------
 // profiles は「マッチング候補検索のため全プロフィール閲覧可」のRLS
@@ -517,6 +593,7 @@ async function loginAdmin(url, email, password, save) {
   }
   S.tab = 'review';
   persistSession();
+  await refreshPushUiState();
   updateConnUI();
   render();
 }
@@ -542,6 +619,12 @@ function updateConnUI() {
     ? new URL(S.url).host + (S.mode === 'admin' ? '（管理者）' : '（service_role）')
     : '未接続';
   document.getElementById('disconnBtn').style.display = on ? '' : 'none';
+  // ブラウザPush通知の切り替えボタンは管理者ログイン時のみ表示
+  // （service接続はPC専用の一時作業のため対象外）
+  const pushBtn = document.getElementById('pushToggleBtn');
+  const pushOn = on && S.mode === 'admin';
+  pushBtn.style.display = pushOn ? '' : 'none';
+  if (pushOn) pushBtn.textContent = S.push.subscribed ? '🔔 通知オン' : '🔕 通知を有効にする';
 }
 
 function renderConnect() {
@@ -1685,6 +1768,10 @@ function render() {
 document.querySelectorAll('nav button').forEach(b =>
   b.addEventListener('click', () => { S.tab = b.dataset.tab; render(); }));
 document.getElementById('disconnBtn').addEventListener('click', disconnect);
+document.getElementById('pushToggleBtn').addEventListener('click', () => {
+  (S.push.subscribed ? disablePushNotifications() : enablePushNotifications())
+    .catch(e => toast(e.message || String(e)));
+});
 
 // 起動: sessionStorage に接続情報があれば復元（管理者ログインのみ）。
 // service_role モードは永続化しない方針のため、旧仕様で保存された service キーが
@@ -1703,8 +1790,11 @@ try {
     }
   }
 } catch (e) { /* 壊れた保存値は無視 */ }
-updateConnUI();
-render();
+(async () => {
+  if (S.mode === 'admin' && S.key) await refreshPushUiState();
+  updateConnUI();
+  render();
+})();
 </script>
 </body>
 </html>
