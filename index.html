@@ -143,6 +143,8 @@
     <button data-tab="review">審査キュー</button>
     <button data-tab="reports">通報審査</button>
     <button data-tab="penalty">ペナルティ</button>
+    <button data-tab="deletions">退会</button>
+    <button data-tab="dup">重複・転記</button>
     <button data-tab="tables">テーブル</button>
     <button data-tab="storage">ストレージ</button>
     <button data-tab="users">ユーザー</button>
@@ -259,6 +261,8 @@ const S = {
   review: { status: 'pending', userFilter: '', offset: 0, limit: 25, openId: null },
   reports: { status: 'pending', offset: 0, limit: 25, openId: null },
   penalty: { minReports: 1, minBlocks: 1, offset: 0, limit: 50 },
+  deletions: { offset: 0, limit: 200 },
+  dup: { status: 'pending_review' },
   tables: { list: [], current: null, offset: 0, limit: 50, sortCol: null, sortDir: 'asc', fCol: '', fOp: 'eq', fVal: '' },
   storage: { buckets: null, bucket: null, prefix: '', offset: 0, limit: 200 },
   users: { page: 1, perPage: 50, filter: '' },
@@ -276,6 +280,8 @@ const REVIEW_RPCS = [
   'admin_set_user_ban', 'admin_unban_user', 'admin_force_delete_user',
   // ブラウザPush通知の購読登録・解除（20260731000002・is_admin()がDB側で強制）
   'register_admin_push_subscription', 'unregister_admin_push_subscription',
+  // person_id転記・重複フラグ審査（20260803000001・is_admin()がDB側で強制）
+  'admin_register_person_keys', 'admin_review_duplicate_flag',
 ];
 function assertAllowed(method, path) {
   const m = method.toUpperCase();
@@ -1478,6 +1484,305 @@ function renderPenalty() {
   return root;
 }
 
+// ---------- 退会（account_deletions の理由・進捗閲覧） ----------
+// 20260805000011_account_deletions_admin_list.sql の RPC を使用。閲覧専用。
+const DELETION_STATUS_LABEL = {
+  deletion_requested: '削除申請受付',
+  anonymizing: '匿名化中',
+  storage_cleanup_pending: '画像削除待ち',
+  storage_cleanup_completed: '画像削除済み',
+  oauth_cleanup_pending: 'SNS連携解除待ち',
+  oauth_cleanup_completed: 'SNS連携解除済み',
+  auth_deletion_pending: '認証削除待ち',
+  deleted: '退会完了',
+  deletion_failed: '失敗（要確認）',
+};
+const DELETION_ROLE_LABEL = { parent: '保護者', caregiver: '保育者', 親: '保護者', 介護者: '保育者' };
+
+function fetchDeletions() {
+  return apiJson('/rest/v1/rpc/admin_list_account_deletions?' + rpcQuery({
+    p_limit: S.deletions.limit, p_offset: S.deletions.offset,
+  }));
+}
+
+function deletionReasonText(row) {
+  return (row.reason && row.reason.trim()) || (row.reason_code && row.reason_code.trim()) || '（理由の記載なし）';
+}
+
+function renderDeletions() {
+  const root = el('div');
+  root.append(el('div', { class: 'callout info' },
+    el('b', null, '退会: '),
+    '退会（アカウント削除）の記録と理由を新しい順に表示します。閲覧専用です。'
+    + '理由は利用者の自由記述を含むため取り扱いに注意してください。'
+    + '「失敗（要確認）」の行が残っている場合はサーバーログの確認が必要です。'));
+
+  const listBox = el('div', { class: 'card' }, el('div', { class: 'placeholder' }, '読込中…'));
+  const summaryBox = el('div', { class: 'card' });
+  const pager = el('div', { class: 'pager' });
+  root.append(summaryBox, listBox, pager);
+
+  (async () => {
+    try {
+      const rows = await fetchDeletions();
+      if (!alive(root)) return;
+
+      // 理由別の件数集計（読込済み分。既定200件で通常は全件）
+      summaryBox.textContent = '';
+      const counts = new Map();
+      for (const r of rows) {
+        const key = deletionReasonText(r);
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+      const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+      summaryBox.append(el('div', null, el('b', null, '理由別の件数'),
+        el('span', { class: 'dim' }, '（読込済み ' + rows.length + ' 件の内訳）')));
+      for (const [reason, n] of sorted) {
+        summaryBox.append(el('div', null,
+          el('span', { class: 'badge' }, String(n) + '件'), ' ', reason));
+      }
+      if (!sorted.length) summaryBox.append(el('div', { class: 'placeholder' }, 'まだ退会の記録はありません'));
+
+      listBox.textContent = '';
+      if (!rows.length) {
+        listBox.append(el('div', { class: 'placeholder' }, '退会の記録はありません'));
+      }
+      for (const row of rows) {
+        const failed = row.status === 'deletion_failed';
+        const done = row.status === 'deleted';
+        listBox.append(el('div', { class: 'rowcard', style: 'cursor:default' },
+          el('span', { class: 'dim' }, jst(row.created_at)), ' ',
+          el('b', null, row.member_id || '（ID未設定）'), ' ',
+          el('span', { class: 'badge' }, DELETION_ROLE_LABEL[row.role] || row.role || '役割不明'), ' ',
+          el('span', { class: 'badge ' + (failed ? 'bad' : (done ? 'good' : '')) },
+            DELETION_STATUS_LABEL[row.status] || row.status), ' ',
+          el('span', null, deletionReasonText(row))));
+      }
+
+      pager.textContent = '';
+      const from = rows.length ? S.deletions.offset + 1 : 0;
+      const to = S.deletions.offset + rows.length;
+      pager.append(
+        el('button', { class: 'btn', disabled: S.deletions.offset === 0 ? '' : null,
+          onclick: () => { S.deletions.offset = Math.max(0, S.deletions.offset - S.deletions.limit); render(); } }, '前へ'),
+        el('span', null, from + '–' + to + ' 件（新しい順）'),
+        el('button', { class: 'btn', disabled: rows.length < S.deletions.limit ? '' : null,
+          onclick: () => { S.deletions.offset += S.deletions.limit; render(); } }, '次へ'));
+    } catch (e) {
+      if (alive(root)) { listBox.textContent = ''; listBox.append(el('div', { class: 'placeholder' }, '読込失敗: ' + e.message)); }
+    }
+  })();
+  return root;
+}
+
+// ---------- 重複・転記タブ（Stage5 person_id。20260803000001） ----------
+const DUP_STATUS_LABEL = {
+  pending_review: '審査待ち',
+  confirmed_same_person: '同一人物と確定',
+  different_person: '別人と確定',
+  inconclusive: '判定保留（再審査可）',
+};
+const DUP_REASON_LABEL = {
+  name_dob_only: '氏名+生年月日のみ一致',
+  document_number_only: '書類番号のみ一致',
+  name_dob_and_document: '氏名+生年月日と書類番号の両方が一致',
+  conflicting_keys: 'キー同士が矛盾（別人物に跨がる一致）',
+  image_mismatch: '券面画像の目視で別人と判断',
+  insufficient_evidence: '判断材料が不足',
+};
+const DUP_PRIOR_LABEL = {
+  active: '利用中', withdrawn: '退会済み', banned: 'BAN・強制退会歴あり',
+  blacklisted: 'ブラックリスト',
+};
+
+function renderDup() {
+  const root = el('div');
+  root.append(el('div', { class: 'callout info' },
+    el('b', null, '重複・転記: '),
+    '承認済み本人確認の氏名転記（person_id登録）と、重複人物フラグの審査を行います。'
+    + '転記した氏名・書類番号は復元不能なハッシュに変換され、生の値はどこにも保存されません。'
+    + '同一人物と確定しても自動処分はされません — 対処はペナルティタブから手動確定してください。'));
+
+  // --- 転記待ちキュー ---
+  const backfillBox = el('div', { class: 'card' }, el('div', { class: 'placeholder' }, '転記待ちを読込中…'));
+  root.append(el('h3', null, '転記待ち（承認済み・person_id未登録）'), backfillBox);
+
+  (async () => {
+    try {
+      const rows = await apiJson('/rest/v1/rpc/admin_list_person_key_backfill');
+      if (!alive(root)) return;
+      backfillBox.textContent = '';
+      if (!rows.length) {
+        backfillBox.append(el('div', { class: 'placeholder' }, '転記待ちはありません'));
+      }
+      for (const row of rows) backfillBox.append(buildBackfillRow(row));
+    } catch (e) {
+      if (alive(root)) { backfillBox.textContent = ''; backfillBox.append(el('div', { class: 'placeholder' }, '読込失敗: ' + e.message)); }
+    }
+  })();
+
+  // --- 重複フラグ一覧 ---
+  const statusSel = el('select', null, Object.entries(DUP_STATUS_LABEL).map(([v, label]) =>
+    el('option', { value: v, selected: S.dup.status === v ? '' : null }, label)));
+  statusSel.addEventListener('change', () => { S.dup.status = statusSel.value; render(); });
+  const flagBox = el('div', { class: 'card' }, el('div', { class: 'placeholder' }, 'フラグを読込中…'));
+  root.append(el('h3', null, '重複人物フラグ'),
+    el('div', { class: 'toolbar' }, el('span', { class: 'dim' }, '状態'), statusSel,
+      el('button', { class: 'btn', style: 'margin-left:auto', onclick: () => render() }, '再読込')),
+    flagBox);
+
+  (async () => {
+    try {
+      const rows = await apiJson('/rest/v1/rpc/admin_list_duplicate_flags?'
+        + rpcQuery({ p_status: S.dup.status }));
+      if (!alive(root)) return;
+      flagBox.textContent = '';
+      if (!rows.length) {
+        flagBox.append(el('div', { class: 'placeholder' },
+          '「' + DUP_STATUS_LABEL[S.dup.status] + '」のフラグはありません'));
+      }
+      for (const row of rows) flagBox.append(buildDupFlagRow(row));
+    } catch (e) {
+      if (alive(root)) { flagBox.textContent = ''; flagBox.append(el('div', { class: 'placeholder' }, '読込失敗: ' + e.message)); }
+    }
+  })();
+  return root;
+}
+
+function buildBackfillRow(row) {
+  const box = el('div', { class: 'rowcard', style: 'border-bottom:1px solid var(--line);padding:10px 0' });
+  const head = el('div', null,
+    el('span', { class: 'mono' }, (DOC_TYPES[row.document_type] || row.document_type) + ' '),
+    el('span', { class: 'dim mono', style: 'font-size:12px' },
+      'user: ' + row.user_id + ' / 承認: ' + String(row.approved_at).slice(0, 16)),
+    row.expired_at ? el('span', { style: 'color:var(--bad)' }, ' ⚠ 券面画像の保持期限切れ（転記不能・記録のみ）') : null);
+  box.append(head);
+  if (row.expired_at) return box;
+
+  const nameIn = el('input', { type: 'text', placeholder: '券面どおりの氏名（姓と名の間の空白は自動で除去）', style: 'width:260px' });
+  const numIn = el('input', { type: 'text',
+    placeholder: row.document_type === 'myNumberCard'
+      ? '（マイナンバーカードは番号入力なし）' : '書類番号（パスポート/免許証。任意だが推奨）',
+    style: 'width:260px', disabled: row.document_type === 'myNumberCard' ? '' : null });
+  const btn = el('button', { class: 'btn primary' }, '転記して登録');
+  btn.addEventListener('click', async () => {
+    if (!nameIn.value.trim()) { toast('氏名を入力してください', true); return; }
+    btn.disabled = true;
+    try {
+      const res = await apiJson('/rest/v1/rpc/admin_register_person_keys', {
+        method: 'POST',
+        body: { p_verification_id: row.verification_id,
+                p_name_on_document: nameIn.value,
+                p_document_number: numIn.value || null } });
+      if (res && res.result === 'flagged') {
+        toast('既存の人物との一致を検知しました。下の重複人物フラグから審査してください');
+      } else {
+        toast('転記・登録が完了しました（' + (res && res.result) + '）');
+      }
+      render();
+    } catch (e) { toast('登録失敗: ' + e.message, true); btn.disabled = false; }
+  });
+  box.append(el('div', { class: 'toolbar', style: 'margin-top:6px' }, nameIn, numIn, btn),
+    el('div', { class: 'dim', style: 'font-size:12px;margin-top:4px' },
+      '個人番号（マイナンバー12桁）は法律により入力・利用できません。'
+      + '入力した氏名・番号はハッシュ化され、原文はどこにも保存されません。'));
+  return box;
+}
+
+function buildDupFlagRow(row) {
+  const box = el('div', { style: 'border-bottom:1px solid var(--line);padding:10px 0' });
+  const matches = Array.isArray(row.matches) ? row.matches : [];
+  const matchedPersons = [...new Set(matches.map(m => m.matched_person_id))];
+  box.append(el('div', null,
+    el('span', { class: 'mono' }, '一致 ' + matches.length + ' キー / 計算 '
+      + row.computed_key_count + ' キー '),
+    el('span', { class: 'dim mono', style: 'font-size:12px' },
+      '新規user: ' + row.new_user_id + ' / 検知: ' + String(row.created_at).slice(0, 16))));
+  // 自動一次判定（20260805000001）: 一致キーの種類から確度を提示する。
+  // 最終判断は従来どおり運営の確定操作のみ（この表示は参考情報）
+  const hasDocNumber = matches.some(m => String(m.key_type).startsWith('document_number'));
+  const hasNameDob = matches.some(m => String(m.key_type).startsWith('name_dob'));
+  if (hasDocNumber || hasNameDob) {
+    box.append(el('div', { style: 'margin:4px 0 0 12px;font-size:13px' },
+      el('b', null, '🤖 自動一次判定: '),
+      hasDocNumber
+        ? el('span', { style: 'color:var(--bad)' }, '同一書類の番号が一致（同一人物の可能性: 高）')
+        : el('span', null, '氏名+生年月日が一致（同一人物の可能性: 中。同姓同名・同じ生年月日の別人の可能性も残ります）')));
+  }
+  for (const m of matches) {
+    box.append(el('div', { class: 'dim', style: 'font-size:12px;margin-left:12px' },
+      '・' + (m.key_type === 'name_dob:v1' ? '氏名+生年月日' : '書類番号') + ' が一致 → 相手user: '
+      + m.matched_user_id + '（' + (DUP_PRIOR_LABEL[m.prior_state] || m.prior_state) + '）'
+      + (m.matched_key_alive ? '' : '（相手キーは保持期間経過で削除済み）')));
+  }
+  // 関係者のペナルティ概況（20260805000001）: 同一人物確定時にブラック
+  // リストが自動引き継ぎされること、利用停止（banned_until）は手動判断で
+  // あることを運営が把握できるようにする
+  const penalties = Array.isArray(row.penalties) ? row.penalties : [];
+  const penalized = penalties.filter(p =>
+    p.is_blacklisted || p.late_cancel_penalty_count > 0 || p.banned_until || p.has_penalty_history);
+  if (row.person_penalized || penalized.length) {
+    const pbox = el('div', { style: 'margin:6px 0 0 12px;padding:6px 8px;border:1px solid var(--bad);border-radius:6px;font-size:12px' });
+    pbox.append(el('div', null, el('b', { style: 'color:var(--bad)' }, '⚠ ペナルティ記録あり'),
+      el('span', { class: 'dim' }, ' — 「同一人物と確定」するとブラックリストは全リンク先へ自動引き継ぎされます。利用停止（BAN）は自動化されないため、必要ならペナルティタブから手動で設定してください')));
+    for (const p of penalized) {
+      const parts = [];
+      if (p.is_blacklisted) parts.push('ブラックリスト中');
+      if (p.late_cancel_penalty_count > 0) parts.push('直前キャンセル' + p.late_cancel_penalty_count + '回');
+      if (p.banned_until) parts.push('利用停止（〜' + String(p.banned_until).slice(0, 16) + '）');
+      if (!parts.length && p.has_penalty_history) parts.push('過去に処分歴あり（現在は解除済み）');
+      pbox.append(el('div', { class: 'mono dim' },
+        '・user: ' + p.user_id + (p.is_new_user ? '（新規）' : '')
+        + (p.profile_alive ? '' : '（退会済み）') + ' — ' + parts.join(' / ')));
+    }
+    if (row.person_penalized) {
+      pbox.append(el('div', { class: 'dim' }, '・この人物は無期限保持対象（persons.penalized_at 設定済み）'));
+    }
+    box.append(pbox);
+  }
+  if (row.status !== 'pending_review' && row.status !== 'inconclusive') {
+    box.append(el('div', { style: 'margin-top:4px' },
+      el('b', null, DUP_STATUS_LABEL[row.status] || row.status),
+      el('span', { class: 'dim' }, ' — 根拠: ' + (DUP_REASON_LABEL[row.review_reason_code] || row.review_reason_code)
+        + (row.review_note ? ' / 補足: ' + row.review_note : ''))));
+    return box;
+  }
+
+  const codeSel = el('select', null,
+    el('option', { value: 'confirmed_same_person' }, '同一人物と確定（既存の人物へリンク）'),
+    el('option', { value: 'different_person' }, '別人と確定（新しい人物として登録）'),
+    el('option', { value: 'inconclusive' }, '判定保留（後で再審査）'));
+  const reasonSel = el('select', null, Object.entries(DUP_REASON_LABEL).map(([v, label]) =>
+    el('option', { value: v }, label)));
+  const personSel = matchedPersons.length > 1
+    ? el('select', null, matchedPersons.map(p => el('option', { value: p }, 'リンク先: ' + p)))
+    : null;
+  const noteIn = el('input', { type: 'text', style: 'width:320px',
+    placeholder: '補足（任意・例外的な場合のみ）' });
+  const btn = el('button', { class: 'btn primary' }, '確定');
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      const res = await apiJson('/rest/v1/rpc/admin_review_duplicate_flag', {
+        method: 'POST',
+        body: { p_flag_id: row.id, p_review_code: codeSel.value,
+                p_reason_code: reasonSel.value, p_note: noteIn.value || '',
+                p_person_id: (codeSel.value === 'confirmed_same_person' && personSel)
+                  ? personSel.value : null } });
+      const carried = res && res.penalty_carried_count;
+      toast('審査を確定しました' + (carried
+        ? '（⚠ ブラックリストを' + carried + 'アカウントへ自動引き継ぎしました。'
+          + '利用停止が必要ならペナルティタブから手動で設定してください）' : ''));
+      render();
+    } catch (e) { toast('確定失敗: ' + e.message, true); btn.disabled = false; }
+  });
+  box.append(el('div', { class: 'toolbar', style: 'margin-top:6px' },
+    codeSel, reasonSel, personSel, noteIn, btn),
+    el('div', { style: 'font-size:12px;margin-top:4px;color:var(--bad)' },
+      '⚠ 補足欄に氏名・住所・書類番号などの個人情報を書かないでください（判定根拠は固定コードで示します。8桁以上の数字列はDB側が拒否します）'));
+  return box;
+}
+
 function renderTables() {
   const root = el('div', { class: 'layout' });
   const side = el('div', { class: 'side' }, el('div', { class: 'placeholder' }, '読込中…'));
@@ -1753,14 +2058,17 @@ function render() {
   const v = document.getElementById('view');
   v.textContent = '';
   if (!S.key) { v.append(renderConnect()); return; }
-  if (S.mode === 'admin' && S.tab !== 'review' && S.tab !== 'reports' && S.tab !== 'penalty') {
+  if (S.mode === 'admin' && S.tab !== 'review' && S.tab !== 'reports'
+      && S.tab !== 'penalty' && S.tab !== 'dup' && S.tab !== 'deletions') {
     v.append(el('div', { class: 'placeholder card' },
-      'このタブは service_role 接続時のみ利用できます（管理者ログインは審査キュー・通報審査・ペナルティ専用です）'));
+      'このタブは service_role 接続時のみ利用できます（管理者ログインは審査キュー・通報審査・ペナルティ・退会・重複転記専用です）'));
     return;
   }
   if (S.tab === 'review') v.append(renderReview());
   else if (S.tab === 'reports') v.append(renderReports());
   else if (S.tab === 'penalty') v.append(renderPenalty());
+  else if (S.tab === 'deletions') v.append(renderDeletions());
+  else if (S.tab === 'dup') v.append(renderDup());
   else if (S.tab === 'tables') v.append(renderTables());
   else if (S.tab === 'storage') v.append(renderStorage());
   else if (S.tab === 'users') v.append(renderUsers());
