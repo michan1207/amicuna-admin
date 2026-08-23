@@ -451,7 +451,11 @@ function persistSession() {
   // 永続化は、権限が審査のみに限定され漏えい時もパスワード変更で即失効できる
   // 管理者ログイン（admin: access/refresh トークン）にのみ許可する。
   if (S.mode !== 'admin') return;
-  sessionStorage.setItem(SS_KEY, JSON.stringify({ url: S.url, mode: S.mode, key: S.key, refreshToken: S.refreshToken }));
+  // data: URL やストレージ無効環境では sessionStorage アクセス自体が例外を投げる。
+  // 記憶できないだけでログイン自体は成立させる（タブを閉じるまでのメモリ保持で動く）。
+  try {
+    sessionStorage.setItem(SS_KEY, JSON.stringify({ url: S.url, mode: S.mode, key: S.key, refreshToken: S.refreshToken }));
+  } catch (e) { /* 保存不可でも続行 */ }
 }
 
 function encodePath(p) { return p.split('/').map(encodeURIComponent).join('/'); }
@@ -613,7 +617,7 @@ function disconnect() {
       headers: { apikey: PUBLISHABLE_KEY, Authorization: 'Bearer ' + S.key },
     }).catch(() => {});
   }
-  sessionStorage.removeItem(SS_KEY);
+  try { sessionStorage.removeItem(SS_KEY); } catch (e) { /* ストレージ不可環境では何もしない */ }
   S.url = ''; S.key = ''; S.refreshToken = ''; S.mode = 'service'; S.persist = false; S.swagger = null;
   for (const u of blobCache.values()) URL.revokeObjectURL(u);
   blobCache.clear();
