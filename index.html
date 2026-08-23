@@ -456,14 +456,16 @@ async function refreshSession() {
 }
 function persistSession() {
   if (!S.persist) return;
-  // service_role キー（RLSを全バイパスする全権キー）は sessionStorage に保存しない。
+  // service_role キー（RLSを全バイパスする全権キー）はストレージに保存しない。
   // 永続化は、権限が審査のみに限定され漏えい時もパスワード変更で即失効できる
   // 管理者ログイン（admin: access/refresh トークン）にのみ許可する。
   if (S.mode !== 'admin') return;
-  // data: URL やストレージ無効環境では sessionStorage アクセス自体が例外を投げる。
+  // 保存先は localStorage（端末永続・次回起動時の自動ログイン用。スマホPWAは
+  // 起動のたびに新セッションになるため sessionStorage では毎回未接続になる）。
+  // data: URL やストレージ無効環境ではアクセス自体が例外を投げるが、
   // 記憶できないだけでログイン自体は成立させる（タブを閉じるまでのメモリ保持で動く）。
   try {
-    sessionStorage.setItem(SS_KEY, JSON.stringify({ url: S.url, mode: S.mode, key: S.key, refreshToken: S.refreshToken }));
+    localStorage.setItem(SS_KEY, JSON.stringify({ url: S.url, mode: S.mode, key: S.key, refreshToken: S.refreshToken }));
   } catch (e) { /* 保存不可でも続行 */ }
 }
 
@@ -626,7 +628,7 @@ function disconnect() {
       headers: { apikey: PUBLISHABLE_KEY, Authorization: 'Bearer ' + S.key },
     }).catch(() => {});
   }
-  try { sessionStorage.removeItem(SS_KEY); } catch (e) { /* ストレージ不可環境では何もしない */ }
+  try { localStorage.removeItem(SS_KEY); sessionStorage.removeItem(SS_KEY); } catch (e) { /* ストレージ不可環境では何もしない */ }
   S.url = ''; S.key = ''; S.refreshToken = ''; S.mode = 'service'; S.persist = false; S.swagger = null;
   for (const u of blobCache.values()) URL.revokeObjectURL(u);
   blobCache.clear();
@@ -679,7 +681,7 @@ function renderConnect() {
     el('label', null, 'プロジェクト URL'), url,
     el('label', null, '管理者アカウント（スマホ・PC共通。審査キュー・通報審査が使えます）'),
     email, pass,
-    el('label', { style: 'display:flex;gap:6px;align-items:center' }, save, 'このタブを閉じるまで記憶する（sessionStorage）'),
+    el('label', { style: 'display:flex;gap:6px;align-items:center' }, save, 'この端末に記憶する（次回から自動ログイン）'),
     loginBtn,
     el('details', { style: 'margin-top:18px' },
       el('summary', { class: 'dim', style: 'cursor:pointer;font-size:13px' }, 'service_role キーで接続（PC専用・全機能: テーブル/ストレージ/ユーザー閲覧）'),
@@ -2096,11 +2098,14 @@ document.getElementById('pushToggleBtn').addEventListener('click', () => {
     .catch(e => toast(e.message || String(e)));
 });
 
-// 起動: sessionStorage に接続情報があれば復元（管理者ログインのみ）。
+// 起動: localStorage に接続情報があれば復元（管理者ログインのみ・自動ログイン）。
+// アクセストークンが失効していても最初のAPIで401→refresh_tokenで自動更新される。
 // service_role モードは永続化しない方針のため、旧仕様で保存された service キーが
 // 残っていても復元せず破棄する（全権キーをストレージに留めない）。
 try {
-  const saved = sessionStorage.getItem(SS_KEY);
+  // 旧仕様(sessionStorage保存)からの移行: 残っていれば読み取り後に破棄
+  const saved = localStorage.getItem(SS_KEY) || sessionStorage.getItem(SS_KEY);
+  sessionStorage.removeItem(SS_KEY);
   if (saved) {
     const s = JSON.parse(saved);
     if (s.mode === 'admin' && s.key) {
@@ -2109,7 +2114,7 @@ try {
       S.refreshToken = s.refreshToken || '';
       S.persist = true;
     } else {
-      sessionStorage.removeItem(SS_KEY);
+      localStorage.removeItem(SS_KEY);
     }
   }
 } catch (e) { /* 壊れた保存値は無視 */ }
