@@ -370,8 +370,23 @@ async function enablePushNotifications() {
     p_endpoint: j.endpoint, p_p256dh: j.keys.p256dh, p_auth: j.keys.auth,
   });
   S.push.subscribed = true;
+  try { localStorage.removeItem(PUSH_OFF_KEY); } catch (e) { /* 保存不可環境は無視 */ }
   toast('プッシュ通知を有効にしました');
   render();
+}
+// 通知許可済みの端末では購読を自動維持する（ボタン操作不要の「常に有効」。
+// ブラウザ都合で購読が失効していても起動時に張り直す）。未許可/拒否の端末では
+// 何もしない＝初回だけ「通知を有効にする」ボタンから許可を取る。
+// 例外: 手動で「通知オン」を切った端末では自動再有効化しない（下のフラグで記憶）
+const PUSH_OFF_KEY = 'amicuna_admin_push_off';
+async function ensurePushSubscribed() {
+  try {
+    await refreshPushUiState();
+    if (localStorage.getItem(PUSH_OFF_KEY)) return;
+    if (!S.push.subscribed && 'Notification' in window && Notification.permission === 'granted') {
+      await enablePushNotifications();
+    }
+  } catch (e) { /* 自動維持の失敗は無視（ボタンから手動で復旧できる） */ }
 }
 async function disablePushNotifications() {
   const sub = await getPushSubscription();
@@ -380,6 +395,7 @@ async function disablePushNotifications() {
     await sub.unsubscribe();
   }
   S.push.subscribed = false;
+  try { localStorage.setItem(PUSH_OFF_KEY, '1'); } catch (e) { /* 保存不可環境は無視 */ }
   toast('プッシュ通知を無効にしました');
   render();
 }
@@ -616,7 +632,7 @@ async function loginAdmin(url, email, password, save) {
   }
   S.tab = 'review';
   persistSession();
-  await refreshPushUiState();
+  await ensurePushSubscribed();
   updateConnUI();
   render();
 }
@@ -2125,7 +2141,7 @@ if ('serviceWorker' in navigator && window.isSecureContext) {
   navigator.serviceWorker.register('./admin-push-sw.js').catch(() => {});
 }
 (async () => {
-  if (S.mode === 'admin' && S.key) await refreshPushUiState();
+  if (S.mode === 'admin' && S.key) await ensurePushSubscribed();
   updateConnUI();
   render();
 })();
