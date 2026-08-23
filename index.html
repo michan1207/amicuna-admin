@@ -349,8 +349,17 @@ async function enablePushNotifications() {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
     toast('このブラウザはプッシュ通知に対応していません'); return;
   }
+  // Android 13+ では過去に拒否済み/OS側ブロックだと確認ダイアログ自体が出ずに
+  // 即 denied が返る（見た目「何も起きない」）ため、状態別に対処を明示する
+  if (Notification.permission === 'denied') {
+    toast('通知がブロックされています。端末の設定→アプリ→このアプリ（またはChrome）→通知を許可してから、もう一度お試しください', true);
+    return;
+  }
   const perm = await Notification.requestPermission();
-  if (perm !== 'granted') { toast('通知が許可されませんでした'); return; }
+  if (perm !== 'granted') {
+    toast('通知が許可されませんでした。確認ダイアログが出ない場合は端末の設定→アプリ→通知から許可してください', true);
+    return;
+  }
   const reg = await navigator.serviceWorker.register('./admin-push-sw.js');
   const sub = await reg.pushManager.subscribe({
     userVisibleOnly: true,
