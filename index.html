@@ -9,8 +9,10 @@
      このページはインライン <script>/<style> のみで動くため *-src は 'unsafe-inline'。
      worker-src 'self' のみ例外: 運営ビューアへのブラウザPush通知
      （admin-push-sw.js、同一オリジンのService Workerのみ許可。外部CDNは不可）。 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src https://*.supabase.co; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; worker-src 'self'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src https://*.supabase.co; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="theme-color" content="#14161a">
+<!-- PWA: ホーム画面追加でスタンドアロン起動（manifest-src 'self' をCSPに追加済み） -->
+<link rel="manifest" href="./manifest.json">
 <title>Amicuna 運営ビューア（閲覧＋審査）</title>
 <style>
   :root {
@@ -2098,6 +2100,12 @@ try {
     }
   }
 } catch (e) { /* 壊れた保存値は無視 */ }
+// PWA/Push: Service Workerを起動時に登録しておく（Secure Contextのみ）。
+// 通知有効化時だけの登録だと、ブラウザ都合で登録が消えた後にPush受信が
+// 途絶えたままになるため、毎起動で再登録する（登録済みなら何もしない）。
+if ('serviceWorker' in navigator && window.isSecureContext) {
+  navigator.serviceWorker.register('./admin-push-sw.js').catch(() => {});
+}
 (async () => {
   if (S.mode === 'admin' && S.key) await refreshPushUiState();
   updateConnUI();
