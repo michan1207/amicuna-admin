@@ -148,7 +148,6 @@
   <nav>
     <button data-tab="review">審査キュー</button>
     <button data-tab="reports">通報審査</button>
-    <button data-tab="credentials">資格・届出</button>
     <button data-tab="penalty">ペナルティ</button>
     <button data-tab="deletions">退会</button>
     <button data-tab="dup">重複・転記</button>
@@ -255,10 +254,9 @@ const REPORT_REASONS = {
 // 子どもの安全カテゴリ（childSafety）: 児童虐待防止法6条の通告義務の運用対象
 // （REPORT_REVIEW_OPS.md の通告基準を参照）
 const CHILD_SAFETY_REASONS = ['minorContact', 'childPhotoMisuse', 'childAbuseSuspected'];
-// 資格証・届出証明の審査（20260828000001・lib/models/caregiver_credential_model.dart と一致）
-const CRED_BUCKET = 'credential-docs';
-const CRED_KIND_LABEL = { qualification: '資格証', notification: '認可外保育施設の届出証明', training: '研修修了証' };
-const CRED_STATUS_LABEL = { pending: '審査中', approved: '確認済み', rejected: '確認できず' };
+// 資格証・届出証明の審査タブは2026-08-30に撤去（収集自体を08-29に廃止・
+// 20260829000009でINSERT権限剥奪＋pending行削除済みのため、新規提出は来ない。
+// 確定済み行の履歴はテーブルタブ(caregiver_credentials・service接続)で閲覧可能）
 const REPORT_STATUS_LABEL = {
   pending: '審査待ち', reviewing: '対応中',
   resolved: '対応済み', dismissed: '却下', accountSuspended: 'アカウント停止相当',
@@ -290,7 +288,6 @@ const S = {
   swagger: null,
   review: { status: 'pending', userFilter: '', offset: 0, limit: 25, openId: null },
   reports: { status: 'pending', offset: 0, limit: 25, openId: null },
-  credentials: { status: 'pending', offset: 0, limit: 25, openId: null },
   penalty: { minReports: 1, minBlocks: 1, offset: 0, limit: 50 },
   deletions: { offset: 0, limit: 200 },
   dup: { status: 'pending_review' },
@@ -313,8 +310,6 @@ const REVIEW_RPCS = [
   'register_admin_push_subscription', 'unregister_admin_push_subscription',
   // person_id転記・重複フラグ審査（20260803000001・is_admin()がDB側で強制）
   'admin_register_person_keys', 'admin_review_duplicate_flag',
-  // 資格証・届出証明の審査（20260828000001。admin=is_admin()強制 / service専用RPC）
-  'admin_review_caregiver_credential', 'review_caregiver_credential',
 ];
 function assertAllowed(method, path) {
   const m = method.toUpperCase();
@@ -403,7 +398,9 @@ async function enablePushNotifications() {
   S.push.subscribed = true;
   try { localStorage.removeItem(PUSH_OFF_KEY); } catch (e) { /* 保存不可環境は無視 */ }
   toast('プッシュ通知を有効にしました');
-  render();
+  // ボタンはヘッダー側(updateConnUI管轄)。render()では更新されず
+  // 「押してもONにならない」ように見えるバグがあった（2026-08-30修正）
+  updateConnUI();
 }
 // 通知許可済みの端末では購読を自動維持する（ボタン操作不要の「常に有効」。
 // ブラウザ都合で購読が失効していても起動時に張り直す）。未許可/拒否の端末では
@@ -428,7 +425,7 @@ async function disablePushNotifications() {
   S.push.subscribed = false;
   try { localStorage.setItem(PUSH_OFF_KEY, '1'); } catch (e) { /* 保存不可環境は無視 */ }
   toast('プッシュ通知を無効にしました');
-  render();
+  updateConnUI();
 }
 
 // ---------- 利用者ID（member_id）検索 ----------
@@ -1388,128 +1385,6 @@ function buildReportActions(row) {
   return box;
 }
 
-// ---------- 資格証・届出証明の審査（20260828000001・規約v47.0.0 第2条-B） ----------
-function credStatusBadge(st) {
-  const cls = { pending: 'warn', approved: 'good', rejected: 'bad' }[st] || 'grey';
-  return el('span', { class: 'badge ' + cls }, CRED_STATUS_LABEL[st] || st);
-}
-
-async function fetchCredentialsPage() {
-  const c = S.credentials;
-  const stFilter = c.status === 'all' ? null : c.status;
-  if (S.mode === 'admin') {
-    const rows = await apiJson('/rest/v1/rpc/admin_list_caregiver_credentials?' +
-      rpcQuery({ p_status: stFilter, p_limit: c.limit, p_offset: c.offset }));
-    return { rows, total: NaN }; // 件数RPCなし: ページャは行数ベースの簡易表示
-  }
-  const q = stFilter ? '&status=eq.' + stFilter : '';
-  const res = await api('/rest/v1/caregiver_credentials?select=*&order=created_at.asc,id.asc'
-    + '&limit=' + c.limit + '&offset=' + c.offset + q, { headers: { Prefer: 'count=exact' } });
-  return { rows: await res.json(), total: totalFromRange(res) };
-}
-
-function renderCredentials() {
-  const root = el('div');
-  root.append(el('div', { class: 'callout info' },
-    el('b', null, '資格証・届出証明の審査: '),
-    '画像を目視で確認して「確認済み」または「確認できず」で確定します。'
-    + '確認は画像の目視であり真正性の保証ではありません（規約 第2条-B）。'
-    + '承認・取消は profiles.credential_verified / notification_verified に自動同期されます。'
-    + '画像は審査確定後30日で自動削除（credential-docs-cleanup）。'));
-
-  const chips = el('div', { class: 'toolbar' });
-  const listBox = el('div', { class: 'card' }, el('div', { class: 'placeholder' }, '読込中…'));
-  const pager = el('div', { class: 'pager' });
-  root.append(chips, listBox, pager);
-
-  fillStatusChips(chips, S.credentials,
-    [['pending', '審査中'], ['approved', '確認済み'], ['rejected', '確認できず'], ['all', 'すべて']]);
-  chips.append(reloadBtn());
-
-  loadInto(listBox, async () => {
-    const { rows, total } = await fetchCredentialsPage();
-    if (!alive(root) || fixPageOverflow(S.credentials, rows, total)) return;
-    listBox.textContent = '';
-    if (!rows.length) listBox.append(el('div', { class: 'placeholder' }, '該当する提出はありません'));
-    for (const row of rows) listBox.append(buildCredentialRow(row));
-    fillPager(pager, S.credentials, rows.length, total, '（提出の古い順）');
-  });
-  return root;
-}
-
-function buildCredentialRow(row) {
-  const head = el('div', { class: 'rowcard' },
-    credStatusBadge(row.status),
-    el('span', null, CRED_KIND_LABEL[row.kind] || row.kind,
-      row.qualification_name ? '（' + row.qualification_name + '）' : ''),
-    el('span', { class: 'dim' }, '提出 ' + jst(row.created_at)),
-    el('span', { class: 'dim' }, '提出者 ', idSpan(row.user_id)),
-  );
-  return toggleCard(S.credentials, row, head, buildCredentialDetail);
-}
-
-function buildCredentialDetail(row) {
-  const d = el('div', { class: 'detail', onclick: e => e.stopPropagation() });
-
-  // 左: 書類画像（credential-docs バケット・管理者SELECTポリシーで取得）
-  const left = mediaBox(CRED_KIND_LABEL[row.kind] || row.kind, row.document_path, null, { bucket: CRED_BUCKET });
-
-  // 右: 事実関係
-  const facts = el('dl', { class: 'facts' },
-    el('dt', null, '提出ID'), el('dd', null, idSpan(row.id)),
-    el('dt', null, '種別'), el('dd', null, (CRED_KIND_LABEL[row.kind] || row.kind)
-      + (row.qualification_name ? '（' + row.qualification_name + '）' : '')),
-    el('dt', null, 'ステータス'), el('dd', null, credStatusBadge(row.status)),
-    el('dt', null, '提出者ID'), el('dd', null, idSpan(row.user_id)),
-    el('dt', null, '提出日時'), el('dd', null, jst(row.created_at)),
-    el('dt', null, '審査日時'), el('dd', null, jst(row.reviewed_at)),
-    el('dt', null, '却下理由'), el('dd', null, row.rejection_reason || el('span', { class: 'null' }, 'なし')),
-  );
-
-  // 下段: 審査操作（pending のみ。RPCがDB側でも pending 以外を拒絶する）
-  const bottom = el('div', { class: 'full' });
-  if (row.status !== 'pending') {
-    bottom.append(el('div', { class: 'dim', style: 'font-size:12px' },
-      '確定済み（' + (CRED_STATUS_LABEL[row.status] || row.status) + '）のため変更できません。'));
-  } else {
-    const box = el('div', { class: 'sqlbox' });
-    box.append(el('h4', null, '審査操作'),
-      el('div', { class: 'dim', style: 'font-size:12px' },
-        '確認の観点: 書類の種別が申告と一致するか（資格証は資格名・氏名欄の体裁 / 届出証明は自治体の受領印・宛名）、'
-        + '画像が鮮明で加工痕がないか。⚠ 目視確認であり真正性の保証ではない。個人番号・氏名・住所をメモに書かない。'));
-    const note = el('textarea', { rows: '2', style: 'width:100%;margin-top:6px', maxlength: '500',
-      placeholder: '審査メモ（内部用・利用者には表示されません）' });
-    const reason = el('textarea', { rows: '2', style: 'width:100%;margin-top:6px', maxlength: '500',
-      placeholder: '確認できなかった理由（「確認できず」の確定時は必須・利用者に表示されます）' });
-    const btnRow = el('div', { class: 'formline' });
-    for (const [st, label, cls] of [['approved', '確認済みで確定', 'btn primary'], ['rejected', '確認できずで確定', 'btn']]) {
-      const b = el('button', { class: cls }, label);
-      b.addEventListener('click', () => {
-        const reasonVal = reason.value.trim();
-        if (st === 'rejected' && !reasonVal) { toast('「確認できず」の確定には理由の入力が必須です', true); reason.focus(); return; }
-        reviewExec(b, {
-          confirmMsg: 'この提出を「' + CRED_STATUS_LABEL[st] + '」にします。\n\n'
-            + '種別: ' + (CRED_KIND_LABEL[row.kind] || row.kind)
-            + (row.qualification_name ? '（' + row.qualification_name + '）' : '') + '\n'
-            + '提出者: ' + row.user_id
-            + (st === 'approved' ? '\n\n※ profiles のバッジ列に自動同期されます。' : '')
-            + '\n\nよろしいですか？',
-          fn: S.mode === 'admin' ? 'admin_review_caregiver_credential' : 'review_caregiver_credential',
-          args: { p_id: row.id, p_status: st, p_note: note.value.trim(), p_rejection_reason: reasonVal },
-          okMsg: '提出を「' + CRED_STATUS_LABEL[st] + '」にしました',
-          errPrefix: '更新できませんでした', st: S.credentials,
-        });
-      });
-      btnRow.append(b);
-    }
-    box.append(note, reason, btnRow);
-    bottom.append(box);
-  }
-
-  d.append(left, el('div', null, facts), bottom);
-  return d;
-}
-
 // ---------- テーブル ----------
 async function ensureSwagger() {
   if (S.swagger) return;
@@ -2194,7 +2069,6 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbo
 const TABS = {
   review: { render: renderReview },
   reports: { render: renderReports },
-  credentials: { render: renderCredentials },
   penalty: { render: renderPenalty },
   deletions: { render: renderDeletions },
   dup: { render: renderDup },
@@ -2210,7 +2084,7 @@ function render() {
   const tab = TABS[S.tab] || TABS.review;
   if (S.mode === 'admin' && tab.serviceOnly) {
     v.append(el('div', { class: 'placeholder card' },
-      'このタブは service_role 接続時のみ利用できます（管理者ログインは審査キュー・通報審査・資格届出・ペナルティ・退会・重複転記専用です）'));
+      'このタブは service_role 接続時のみ利用できます（管理者ログインは審査キュー・通報審査・ペナルティ・退会・重複転記専用です）'));
     return;
   }
   v.append(tab.render());
