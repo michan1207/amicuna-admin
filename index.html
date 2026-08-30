@@ -9,7 +9,11 @@
      このページはインライン <script>/<style> のみで動くため *-src は 'unsafe-inline'。
      worker-src 'self' のみ例外: 運営ビューアへのブラウザPush通知
      （admin-push-sw.js、同一オリジンのService Workerのみ許可。外部CDNは不可）。 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src https://*.supabase.co; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+<!-- connect-src は本番プロジェクトの完全一致にピン止めする（*.supabase.co だと
+     万一XSSが混入した場合に攻撃者の自前Supabaseプロジェクトへ鍵・画像を持ち出せてしまう）。
+     プロジェクトURLを変更する場合はここと DEFAULT_URL を同時に更新すること。 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src https://jtdetpmorgihuzqkayni.supabase.co; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
 <meta name="theme-color" content="#14161a">
 <!-- PWA: ホーム画面追加でスタンドアロン起動（manifest-src 'self' をCSPに追加済み） -->
 <link rel="manifest" href="./manifest.json">
@@ -144,6 +148,7 @@
   <nav>
     <button data-tab="review">審査キュー</button>
     <button data-tab="reports">通報審査</button>
+    <button data-tab="credentials">資格・届出</button>
     <button data-tab="penalty">ペナルティ</button>
     <button data-tab="deletions">退会</button>
     <button data-tab="dup">重複・転記</button>
@@ -168,6 +173,12 @@
 
 <script>
 'use strict';
+// クリックジャッキング対策: frame-ancestors は <meta> CSP では効かないため、
+// iframe 内での表示を検知したら描画も動作もすべて止める（審査ボタンの透明重ね対策）
+if (window.top !== window.self) {
+  document.documentElement.textContent = 'このページは埋め込み（iframe）表示では利用できません。直接開いてください。';
+  throw new Error('framed');
+}
 /* Amicuna 運営ビューア — Supabase 閲覧＋本人確認・通報審査ダッシュボード
  * 依存ゼロの単一ファイル。Supabase の REST(PostgREST) / Storage / Auth Admin API を
  * fetch で直接叩く。書き込みは審査RPC（本人確認の approve/reject と通報の review）
@@ -184,6 +195,11 @@ const PUBLISHABLE_KEY = 'sb_publishable_3acCV-N2wUfDGhN6A72D1Q_-99vpH6O';
 // ブラウザに配布して問題ない値）
 const PUSH_VAPID_PUBLIC_KEY = 'BF7bC05LUQPXHFC_xUzKdz8K_tVTd7zWRgC3fTI4eyyUREfL4wzLoGya7eU3lgGZ5mXw54jKYP6R-q2YBatWTVM';
 const SS_KEY = 'amicuna_sb_viewer';
+// 保存済みログインの寿命（2026-08-29 監査 P2-15）。
+// トークンを更新するたびに savedAt を打ち直すので実質「最終利用から12時間」。
+// 審査作業1日分はまたげるが、端末を手放したあと無期限に管理者権限
+// （全利用者の本人確認書類が見える）が残ることは無くなる。
+const SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 const DOC_BUCKET = 'identity-docs';
 
 // 在留カード・特別永住者証明書は2026-07-15に受付終了（migrations/20260715000001）。
@@ -222,15 +238,27 @@ const GENDER_RULE = {
   drivingHistoryCertificate: '性別欄なし。自撮りと書類の顔写真を見比べ、女性と判断できる場合のみ female、判断に迷えば notListed。男性と思われる場合は承認せず却下（手順6参照）。',
 };
 // 通報審査（reports）: 理由・ステータスのラベル（lib/models/report_model.dart と一致させること）
+// 2026-08-28: タクソノミー刷新（388b4ce・11理由）に同期
 const REPORT_REASONS = {
-  falseClaim: '虚偽申告',
-  falseIdentity: 'なりすまし',
-  inappropriateMessage: '不適切メッセージ',
-  fraud: '詐欺・金銭要求',
-  minorContact: '未成年関与',
-  spam: 'スパム',
+  falseClaim: '資格・経験の虚偽申告',
+  falseIdentity: '年齢・性別の虚偽申告',
+  inappropriateMessage: '暴言・誹謗中傷・ヘイト発言',
+  fraud: '金銭の要求・詐欺の疑い',
+  minorContact: '子どもへの不審な行動・言動',
+  spam: '業者・スパム・宣伝行為',
+  childPhotoMisuse: '子どもの写真・情報の無断使用',
+  childAbuseSuspected: '子どもへの虐待・ネグレクトの疑い',
+  stalkingThreat: '脅迫・ストーカー行為',
+  sexualHarassment: '性的な嫌がらせ',
   other: 'その他',
 };
+// 子どもの安全カテゴリ（childSafety）: 児童虐待防止法6条の通告義務の運用対象
+// （REPORT_REVIEW_OPS.md の通告基準を参照）
+const CHILD_SAFETY_REASONS = ['minorContact', 'childPhotoMisuse', 'childAbuseSuspected'];
+// 資格証・届出証明の審査（20260828000001・lib/models/caregiver_credential_model.dart と一致）
+const CRED_BUCKET = 'credential-docs';
+const CRED_KIND_LABEL = { qualification: '資格証', notification: '認可外保育施設の届出証明', training: '研修修了証' };
+const CRED_STATUS_LABEL = { pending: '審査中', approved: '確認済み', rejected: '確認できず' };
 const REPORT_STATUS_LABEL = {
   pending: '審査待ち', reviewing: '対応中',
   resolved: '対応済み', dismissed: '却下', accountSuspended: 'アカウント停止相当',
@@ -262,6 +290,7 @@ const S = {
   swagger: null,
   review: { status: 'pending', userFilter: '', offset: 0, limit: 25, openId: null },
   reports: { status: 'pending', offset: 0, limit: 25, openId: null },
+  credentials: { status: 'pending', offset: 0, limit: 25, openId: null },
   penalty: { minReports: 1, minBlocks: 1, offset: 0, limit: 50 },
   deletions: { offset: 0, limit: 200 },
   dup: { status: 'pending_review' },
@@ -284,6 +313,8 @@ const REVIEW_RPCS = [
   'register_admin_push_subscription', 'unregister_admin_push_subscription',
   // person_id転記・重複フラグ審査（20260803000001・is_admin()がDB側で強制）
   'admin_register_person_keys', 'admin_review_duplicate_flag',
+  // 資格証・届出証明の審査（20260828000001。admin=is_admin()強制 / service専用RPC）
+  'admin_review_caregiver_credential', 'review_caregiver_credential',
 ];
 function assertAllowed(method, path) {
   const m = method.toUpperCase();
@@ -480,8 +511,15 @@ function persistSession() {
   // 起動のたびに新セッションになるため sessionStorage では毎回未接続になる）。
   // data: URL やストレージ無効環境ではアクセス自体が例外を投げるが、
   // 記憶できないだけでログイン自体は成立させる（タブを閉じるまでのメモリ保持で動く）。
+  //
+  // 2026-08-29 監査 P2-15: 保存に発行時刻を持たせ、SESSION_MAX_AGE_MS を過ぎた
+  // 保存値は起動時に破棄する。以前は無期限で、端末を紛失・放置しても
+  // 「全利用者の本人確認書類を閲覧できる状態」が永久に残っていた。
   try {
-    localStorage.setItem(SS_KEY, JSON.stringify({ url: S.url, mode: S.mode, key: S.key, refreshToken: S.refreshToken }));
+    localStorage.setItem(SS_KEY, JSON.stringify({
+      url: S.url, mode: S.mode, key: S.key, refreshToken: S.refreshToken,
+      savedAt: Date.now(),
+    }));
   } catch (e) { /* 保存不可でも続行 */ }
 }
 
@@ -590,6 +628,67 @@ function statusBadge(st) { return el('span', { class: 'badge ' + st }, STATUS_LA
 // 非同期描画のstale書き込み防止: コンテナがDOMから外れていたら捨てる
 const alive = node => node.isConnected;
 
+// ---------- 一覧タブ共通部品（審査キュー・通報・資格届出・ペナルティ・退会・重複転記で共用） ----------
+// 非同期読込の共通エラー処理: 失敗したら box をエラー表示に置き換える
+function loadInto(box, fn) {
+  Promise.resolve().then(fn).catch(e => {
+    if (alive(box)) { box.textContent = ''; box.append(el('div', { class: 'placeholder' }, '読込失敗: ' + e.message)); }
+  });
+}
+// 他所の審査でキューが縮んで offset が総件数を超えたら最終ページへ戻す（戻したら true）
+function fixPageOverflow(st, rows, total) {
+  if (!rows.length && total > 0 && st.offset > 0) {
+    st.offset = Math.floor((total - 1) / st.limit) * st.limit;
+    render();
+    return true;
+  }
+  return false;
+}
+// 前へ/次へページャ。total が NaN（件数不明）のときは「表示行数 < limit なら最終ページ」とみなす
+function fillPager(p, st, shown, total, suffix) {
+  p.textContent = '';
+  const from = shown ? st.offset + 1 : 0;
+  const to = st.offset + shown;
+  p.append(
+    el('button', { class: 'btn', disabled: st.offset === 0 ? '' : null,
+      onclick: () => { st.offset = Math.max(0, st.offset - st.limit); render(); } }, '前へ'),
+    el('span', null, from + '–' + to + (isNaN(total) ? '' : ' / ' + total) + ' 件' + (suffix || '')),
+    el('button', { class: 'btn', disabled: (isNaN(total) ? shown < st.limit : to >= total) ? '' : null,
+      onclick: () => { st.offset += st.limit; render(); } }, '次へ'));
+}
+// ステータス絞り込みチップ（[値, 表示ラベル] の配列）
+function fillStatusChips(chips, st, defs) {
+  chips.textContent = '';
+  for (const [value, label] of defs) {
+    chips.append(el('button', {
+      class: 'chip' + (st.status === value ? ' active' : ''),
+      onclick: () => { st.status = value; st.offset = 0; st.openId = null; render(); },
+    }, label));
+  }
+}
+const reloadBtn = () => el('button', { class: 'btn', style: 'margin-left:auto', onclick: () => render() }, '再読込');
+// 行カード（クリックで詳細の開閉。st.openId で再描画後も開状態を維持）
+function toggleCard(st, row, head, buildDetail) {
+  const card = el('div', { class: 'card' }, head);
+  head.addEventListener('click', () => {
+    const open = card.querySelector('.detail');
+    if (open) { open.remove(); st.openId = null; }
+    else { st.openId = row.id; card.append(buildDetail(row)); }
+  });
+  if (st.openId === row.id) card.append(buildDetail(row));
+  return card;
+}
+// 確認ダイアログ → 審査RPC → トースト → 再描画の共通実行系（st 指定時は成功で開いていた詳細を閉じる）
+function reviewExec(btn, { confirmMsg, fn, args, okMsg, errPrefix, st }) {
+  if (!confirm(confirmMsg)) return;
+  btn.disabled = true;
+  callReviewRpc(fn, args).then(() => {
+    toast(okMsg);
+    if (st) st.openId = null;
+    render();
+  }).catch(e => { toast(errPrefix + ': ' + e.message, true); btn.disabled = false; });
+}
+
 // ---------- 接続 ----------
 function jwtRole(key) {
   try { return JSON.parse(atob(key.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).role || null; }
@@ -637,12 +736,26 @@ async function loginAdmin(url, email, password, save) {
   render();
 }
 function disconnect() {
-  // adminモードはサーバー側のセッションも失効させる（fire-and-forget・失敗しても切断は続行）
+  // adminモードは Push購読の解除 → サーバー側セッションの失効 の順で後始末する
+  // （fire-and-forget・失敗しても切断は続行）。購読を残すと端末を手放したあとも
+  // 審査通知が届き続けるため、明示的な切断時はサーバー側からも購読を消す。
+  // logout でトークンが失効する前に解除RPCを呼ぶ必要があるため直列にし、
+  // S はこの直後にクリアされるので url/key はここで捕捉しておく。
   if (S.mode === 'admin' && S.key) {
-    fetch(S.url + '/auth/v1/logout', {
+    const url = S.url, key = S.key;
+    const logout = () => fetch(url + '/auth/v1/logout', {
       method: 'POST',
-      headers: { apikey: PUBLISHABLE_KEY, Authorization: 'Bearer ' + S.key },
+      headers: { apikey: PUBLISHABLE_KEY, Authorization: 'Bearer ' + key },
     }).catch(() => {});
+    getPushSubscription().then(sub => {
+      if (!sub) return;
+      return fetch(url + '/rest/v1/rpc/unregister_admin_push_subscription', {
+        method: 'POST',
+        headers: { apikey: PUBLISHABLE_KEY, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ p_endpoint: sub.endpoint }),
+      }).then(() => sub.unsubscribe());
+    }).catch(() => {}).then(logout, logout);
+    S.push.subscribed = false;
   }
   try { localStorage.removeItem(SS_KEY); sessionStorage.removeItem(SS_KEY); } catch (e) { /* ストレージ不可環境では何もしない */ }
   S.url = ''; S.key = ''; S.refreshToken = ''; S.mode = 'service'; S.persist = false; S.swagger = null;
@@ -797,50 +910,27 @@ function renderReview() {
     }
   })();
 
-  (async () => {
-    try {
-      const { counts, rows, total } = await fetchReviewPage();
-      if (!alive(root)) return;
-      // 他所の審査でキューが縮んで offset が総件数を超えたら最終ページへ戻す
-      if (!rows.length && total > 0 && S.review.offset > 0) {
-        S.review.offset = Math.floor((total - 1) / S.review.limit) * S.review.limit;
-        render();
-        return;
-      }
-      const all = counts[0] + counts[1] + counts[2];
-
-      // ステータスチップ
-      chips.textContent = '';
-      const defs = [['pending', counts[0]], ['approved', counts[1]], ['rejected', counts[2]], ['all', all]];
-      for (const [st, n] of defs) {
-        chips.append(el('button', {
-          class: 'chip' + (S.review.status === st ? ' active' : ''),
-          onclick: () => { S.review.status = st; S.review.offset = 0; S.review.openId = null; render(); },
-        }, (st === 'all' ? 'すべて' : STATUS_LABEL[st]) + ' ' + n));
-      }
-      if (S.review.userFilter) {
-        chips.append(el('span', { class: 'badge grey mono' }, '利用者: ' + S.review.userFilter.slice(0, 8) + '…'),
-          el('button', { class: 'btn', onclick: () => { S.review.userFilter = ''; S.review.offset = 0; render(); } }, '絞り込み解除'));
-      }
-      chips.append(el('button', { class: 'btn', style: 'margin-left:auto', onclick: () => render() }, '再読込'));
-
-      // 一覧
-      listBox.textContent = '';
-      if (!rows.length) listBox.append(el('div', { class: 'placeholder' }, '該当する申請はありません'));
-      for (const row of rows) listBox.append(buildReviewRow(row));
-
-      // ページャ
-      pager.textContent = '';
-      const from = total ? S.review.offset + 1 : 0;
-      const to = S.review.offset + rows.length;
-      pager.append(
-        el('button', { class: 'btn', disabled: S.review.offset === 0 ? '' : null, onclick: () => { S.review.offset = Math.max(0, S.review.offset - S.review.limit); render(); } }, '前へ'),
-        el('span', null, from + '–' + to + ' / ' + total + ' 件（申請日時の古い順）'),
-        el('button', { class: 'btn', disabled: to >= total ? '' : null, onclick: () => { S.review.offset += S.review.limit; render(); } }, '次へ'));
-    } catch (e) {
-      if (alive(root)) { listBox.textContent = ''; listBox.append(el('div', { class: 'placeholder' }, '読込失敗: ' + e.message)); }
+  loadInto(listBox, async () => {
+    const { counts, rows, total } = await fetchReviewPage();
+    if (!alive(root) || fixPageOverflow(S.review, rows, total)) return;
+    fillStatusChips(chips, S.review, [
+      ['pending', STATUS_LABEL.pending + ' ' + counts[0]],
+      ['approved', STATUS_LABEL.approved + ' ' + counts[1]],
+      ['rejected', STATUS_LABEL.rejected + ' ' + counts[2]],
+      ['all', 'すべて ' + (counts[0] + counts[1] + counts[2])],
+    ]);
+    if (S.review.userFilter) {
+      chips.append(el('span', { class: 'badge grey mono' }, '利用者: ' + S.review.userFilter.slice(0, 8) + '…'),
+        el('button', { class: 'btn', onclick: () => { S.review.userFilter = ''; S.review.offset = 0; render(); } }, '絞り込み解除'));
     }
-  })();
+    chips.append(reloadBtn());
+
+    listBox.textContent = '';
+    if (!rows.length) listBox.append(el('div', { class: 'placeholder' }, '該当する申請はありません'));
+    for (const row of rows) listBox.append(buildReviewRow(row));
+
+    fillPager(pager, S.review, rows.length, total, '（申請日時の古い順）');
+  });
   return root;
 }
 
@@ -854,7 +944,6 @@ function staleBadge(row) {
 }
 
 function buildReviewRow(row) {
-  const card = el('div', { class: 'card' });
   const head = el('div', { class: 'rowcard' },
     statusBadge(row.status),
     el('span', null, DOC_TYPES[row.document_type] || row.document_type),
@@ -865,54 +954,29 @@ function buildReviewRow(row) {
     row.selfie_path ? null : el('span', { class: 'badge warn', title: '2026-07-10以前の旧申請' }, '自撮りなし'),
     row.gender_on_document ? el('span', { class: 'badge grey' }, '転記: ' + (GENDER_LABEL[row.gender_on_document] || row.gender_on_document)) : null,
   );
-  head.addEventListener('click', () => {
-    const open = card.querySelector('.detail');
-    if (open) { open.remove(); S.review.openId = null; }
-    else { S.review.openId = row.id; card.append(buildReviewDetail(row)); }
-  });
-  card.append(head);
-  if (S.review.openId === row.id) card.append(buildReviewDetail(row));
-  return card;
+  return toggleCard(S.review, row, head, buildReviewDetail);
 }
 
-function imageBox(label, path, missingNote) {
+// 画像/動画ボックス（審査対象メディア。blob URL で展開しディスクに保存しない）
+function mediaBox(label, path, missingNote, opts = {}) {
   const box = el('div', { class: 'imgbox' }, el('div', { class: 'imglabel' }, label));
-  if (!path) { box.append(el('div', { class: 'imgholder' }, missingNote || 'パスなし')); return box; }
+  if (!path) { box.append(el('div', { class: 'imgholder' }, missingNote || (opts.video ? '動画なし' : 'パスなし'))); return box; }
   box.append(el('div', { class: 'imgpath mono trunc', title: 'クリックでパスをコピー', onclick: () => copyText(path) }, path));
-  const holder = el('div', { class: 'imgholder' }, '読込中…');
+  const holder = el('div', { class: 'imgholder' },
+    opts.video ? '読込中…（動画は容量が大きく時間がかかる場合があります）' : '読込中…');
   box.append(holder);
-  fetchObjectUrl(DOC_BUCKET, path).then(u => {
+  fetchObjectUrl(opts.bucket || DOC_BUCKET, path).then(u => {
     if (!alive(holder)) return;
     holder.textContent = '';
-    holder.append(el('img', { src: u, alt: label, onclick: () => openLightbox(u, label + ' — ' + path) }));
+    holder.append(opts.video
+      ? el('video', { src: u, controls: '', playsinline: '', preload: 'metadata',
+          style: 'max-width:100%;max-height:380px;border-radius:4px' })
+      : el('img', { src: u, alt: label, onclick: () => openLightbox(u, label + ' — ' + path) }));
   }).catch(e => {
     if (!alive(holder)) return;
     holder.classList.add('err');
     holder.textContent = e.status === 404 || e.status === 400
-      ? '画像が見つかりません（クリーンアップ削除済み・または未アップロード）'
-      : '取得失敗: ' + e.message;
-  });
-  return box;
-}
-
-function videoBox(label, path, missingNote) {
-  const box = el('div', { class: 'imgbox' }, el('div', { class: 'imglabel' }, label));
-  if (!path) { box.append(el('div', { class: 'imgholder' }, missingNote || '動画なし')); return box; }
-  box.append(el('div', { class: 'imgpath mono trunc', title: 'クリックでパスをコピー', onclick: () => copyText(path) }, path));
-  const holder = el('div', { class: 'imgholder' }, '読込中…（動画は容量が大きく時間がかかる場合があります）');
-  box.append(holder);
-  fetchObjectUrl(DOC_BUCKET, path).then(u => {
-    if (!alive(holder)) return;
-    holder.textContent = '';
-    holder.append(el('video', {
-      src: u, controls: '', playsinline: '', preload: 'metadata',
-      style: 'max-width:100%;max-height:380px;border-radius:4px',
-    }));
-  }).catch(e => {
-    if (!alive(holder)) return;
-    holder.classList.add('err');
-    holder.textContent = e.status === 404 || e.status === 400
-      ? '動画が見つかりません（クリーンアップ削除済み・または未アップロード）'
+      ? (opts.video ? '動画' : '画像') + 'が見つかりません（クリーンアップ削除済み・または未アップロード）'
       : '取得失敗: ' + e.message;
   });
   return box;
@@ -924,9 +988,9 @@ function buildReviewDetail(row) {
   // 左: 画像（書類と自撮りを並べて目視照合）+ ライブネス動画（証跡）
   const left = el('div', null,
     el('div', { class: 'imgs' },
-      imageBox('書類画像（生年月日・性別欄・有効期限を確認）', row.document_path),
-      imageBox('自撮り画像（書類の顔写真と見比べる）', row.selfie_path, '自撮りなし（2026-07-10以前の旧申請のため対象外）'),
-      videoBox('本人確認動画（ライブネス判定セッション・証跡）', row.video_path, '動画なし（2026-07-16以前の旧申請のため対象外）')));
+      mediaBox('書類画像（生年月日・性別欄・有効期限を確認）', row.document_path),
+      mediaBox('自撮り画像（書類の顔写真と見比べる）', row.selfie_path, '自撮りなし（2026-07-10以前の旧申請のため対象外）'),
+      mediaBox('本人確認動画（ライブネス判定セッション・証跡）', row.video_path, '動画なし（2026-07-16以前の旧申請のため対象外）', { video: true })));
 
   // path先頭フォルダ ≠ user_id の防御チェック（DB制約済みだが不一致は即通報扱いのため表示）
   for (const p of [row.document_path, row.selfie_path]) {
@@ -1077,26 +1141,20 @@ function buildApproveSql(row) {
   };
   for (const i of [birth, gender, note]) i.addEventListener('input', update);
   copyBtn.addEventListener('click', () => copyText(pre.textContent));
-  execBtn.addEventListener('click', async () => {
+  execBtn.addEventListener('click', () => {
     const age = calcAge(birth.value, jstToday());
-    const msg = 'この申請を承認します。\n\n'
-      + '書類: ' + (DOC_TYPES[row.document_type] || row.document_type) + '\n'
-      + '生年月日: ' + birth.value + '（本日時点で満' + age + '歳）\n'
-      + '転記性別: ' + GENDER_LABEL[gender.value]
-      + (note.value ? '\n審査メモ: ' + note.value : '')
-      + '\n\nprofiles のバッジが自動更新されます。よろしいですか？';
-    if (!confirm(msg)) return;
-    execBtn.disabled = true;
-    try {
-      await callReviewRpc(S.mode === 'admin' ? 'admin_approve_identity_verification' : 'approve_identity_verification',
-        { p_id: row.id, p_birth_date: birth.value, p_gender: gender.value, p_note: note.value });
-      toast('承認しました（' + (DOC_TYPES[row.document_type] || row.document_type) + ' / ' + GENDER_LABEL[gender.value] + '）');
-      S.review.openId = null;
-      render();
-    } catch (e) {
-      toast('承認できませんでした: ' + e.message, true);
-      execBtn.disabled = false;
-    }
+    reviewExec(execBtn, {
+      confirmMsg: 'この申請を承認します。\n\n'
+        + '書類: ' + (DOC_TYPES[row.document_type] || row.document_type) + '\n'
+        + '生年月日: ' + birth.value + '（本日時点で満' + age + '歳）\n'
+        + '転記性別: ' + GENDER_LABEL[gender.value]
+        + (note.value ? '\n審査メモ: ' + note.value : '')
+        + '\n\nprofiles のバッジが自動更新されます。よろしいですか？',
+      fn: S.mode === 'admin' ? 'admin_approve_identity_verification' : 'approve_identity_verification',
+      args: { p_id: row.id, p_birth_date: birth.value, p_gender: gender.value, p_note: note.value },
+      okMsg: '承認しました（' + (DOC_TYPES[row.document_type] || row.document_type) + ' / ' + GENDER_LABEL[gender.value] + '）',
+      errPrefix: '承認できませんでした', st: S.review,
+    });
   });
   update();
   box.append(el('div', { class: 'formline' },
@@ -1131,24 +1189,17 @@ function buildRejectSql(row) {
   };
   reason.addEventListener('input', update);
   copyBtn.addEventListener('click', () => copyText(pre.textContent));
-  execBtn.addEventListener('click', async () => {
-    const msg = 'この申請を却下します。\n\n'
-      + '書類: ' + (DOC_TYPES[row.document_type] || row.document_type) + '\n'
-      + '却下理由（利用者に表示・永久保存されます）:\n' + reason.value.trim()
-      + (row.status === 'approved' ? '\n\n※ 承認済み行の却下＝バッジ剥奪です。' : '')
-      + '\n\nよろしいですか？';
-    if (!confirm(msg)) return;
-    execBtn.disabled = true;
-    try {
-      await callReviewRpc(S.mode === 'admin' ? 'admin_reject_identity_verification' : 'reject_identity_verification',
-        { p_id: row.id, p_reason: reason.value.trim() });
-      toast('却下しました');
-      S.review.openId = null;
-      render();
-    } catch (e) {
-      toast('却下できませんでした: ' + e.message, true);
-      execBtn.disabled = false;
-    }
+  execBtn.addEventListener('click', () => {
+    reviewExec(execBtn, {
+      confirmMsg: 'この申請を却下します。\n\n'
+        + '書類: ' + (DOC_TYPES[row.document_type] || row.document_type) + '\n'
+        + '却下理由（利用者に表示・永久保存されます）:\n' + reason.value.trim()
+        + (row.status === 'approved' ? '\n\n※ 承認済み行の却下＝バッジ剥奪です。' : '')
+        + '\n\nよろしいですか？',
+      fn: S.mode === 'admin' ? 'admin_reject_identity_verification' : 'reject_identity_verification',
+      args: { p_id: row.id, p_reason: reason.value.trim() },
+      okMsg: '却下しました', errPrefix: '却下できませんでした', st: S.review,
+    });
   });
   update();
   if (row.status === 'approved') box.append(el('div', { class: 'warnline' }, '承認済み行の却下＝バッジ剥奪です。男性判明時は同利用者の他の承認行もすべて剥奪すること（申請履歴で確認）。'));
@@ -1207,56 +1258,27 @@ function renderReports() {
   const pager = el('div', { class: 'pager' });
   root.append(chips, listBox, pager);
 
-  (async () => {
-    try {
-      const { counts, rows, total } = await fetchReportsPage();
-      if (!alive(root)) return;
-      // 他所の審査でキューが縮んで offset が総件数を超えたら最終ページへ戻す
-      if (!rows.length && total > 0 && S.reports.offset > 0) {
-        S.reports.offset = Math.floor((total - 1) / S.reports.limit) * S.reports.limit;
-        render();
-        return;
-      }
-      const all = counts.pending + counts.reviewing + counts.closed;
+  loadInto(listBox, async () => {
+    const { counts, rows, total } = await fetchReportsPage();
+    if (!alive(root) || fixPageOverflow(S.reports, rows, total)) return;
+    fillStatusChips(chips, S.reports, [
+      ['pending', '審査待ち ' + counts.pending],
+      ['reviewing', '対応中 ' + counts.reviewing],
+      ['closed', '終端（対応済み・却下・停止） ' + counts.closed],
+      ['all', 'すべて ' + (counts.pending + counts.reviewing + counts.closed)],
+    ]);
+    chips.append(reloadBtn());
 
-      // ステータスチップ
-      chips.textContent = '';
-      const defs = [
-        ['pending', '審査待ち', counts.pending],
-        ['reviewing', '対応中', counts.reviewing],
-        ['closed', '終端（対応済み・却下・停止）', counts.closed],
-        ['all', 'すべて', all],
-      ];
-      for (const [st, label, n] of defs) {
-        chips.append(el('button', {
-          class: 'chip' + (S.reports.status === st ? ' active' : ''),
-          onclick: () => { S.reports.status = st; S.reports.offset = 0; S.reports.openId = null; render(); },
-        }, label + ' ' + n));
-      }
-      chips.append(el('button', { class: 'btn', style: 'margin-left:auto', onclick: () => render() }, '再読込'));
+    listBox.textContent = '';
+    if (!rows.length) listBox.append(el('div', { class: 'placeholder' }, '該当する通報はありません'));
+    for (const row of rows) listBox.append(buildReportRow(row));
 
-      // 一覧
-      listBox.textContent = '';
-      if (!rows.length) listBox.append(el('div', { class: 'placeholder' }, '該当する通報はありません'));
-      for (const row of rows) listBox.append(buildReportRow(row));
-
-      // ページャ
-      pager.textContent = '';
-      const from = total ? S.reports.offset + 1 : 0;
-      const to = S.reports.offset + rows.length;
-      pager.append(
-        el('button', { class: 'btn', disabled: S.reports.offset === 0 ? '' : null, onclick: () => { S.reports.offset = Math.max(0, S.reports.offset - S.reports.limit); render(); } }, '前へ'),
-        el('span', null, from + '–' + to + ' / ' + total + ' 件（緊急優先・通報日時の古い順）'),
-        el('button', { class: 'btn', disabled: to >= total ? '' : null, onclick: () => { S.reports.offset += S.reports.limit; render(); } }, '次へ'));
-    } catch (e) {
-      if (alive(root)) { listBox.textContent = ''; listBox.append(el('div', { class: 'placeholder' }, '読込失敗: ' + e.message)); }
-    }
-  })();
+    fillPager(pager, S.reports, rows.length, total, '（緊急優先・通報日時の古い順）');
+  });
   return root;
 }
 
 function buildReportRow(row) {
-  const card = el('div', { class: 'card' });
   const head = el('div', { class: 'rowcard' },
     reportStatusBadge(row.status),
     row.priority === 1 ? urgentBadge() : null,
@@ -1265,14 +1287,7 @@ function buildReportRow(row) {
     el('span', { class: 'dim' }, '被通報者 ', idSpan(row.reported_user_id),
       row.reported_nickname ? '（' + row.reported_nickname + '）' : ''),
   );
-  head.addEventListener('click', () => {
-    const open = card.querySelector('.detail');
-    if (open) { open.remove(); S.reports.openId = null; }
-    else { S.reports.openId = row.id; card.append(buildReportDetail(row)); }
-  });
-  card.append(head);
-  if (S.reports.openId === row.id) card.append(buildReportDetail(row));
-  return card;
+  return toggleCard(S.reports, row, head, buildReportDetail);
 }
 
 function buildReportDetail(row) {
@@ -1325,6 +1340,16 @@ function buildReportActions(row) {
     warn.textContent = looksLikeMyNumber(note.value)
       ? '⚠ 12桁の数字列（個人番号様）が含まれています。メモへの転記は禁止です。' : '';
   });
+  // 子どもの安全カテゴリ: 189通告の記録（児童虐待防止法6条・REPORT_REVIEW_OPS.md）
+  const isChildSafety = CHILD_SAFETY_REASONS.includes(row.reason);
+  let dial189 = null;
+  if (isChildSafety) {
+    dial189 = el('input', { type: 'checkbox', id: 'dial189_' + row.id });
+    box.append(el('div', { style: 'margin-top:8px;padding:8px 10px;border:1px solid #c33;border-radius:6px;font-size:12px' },
+      el('b', null, '🚨 子どもの安全カテゴリ: '),
+      '虐待・ネグレクトの疑いが合理的に否定できない場合は、確定の前に児童相談所 189 へ通告する（通告は児童虐待防止法6条にもとづく義務であり、守秘義務違反にならない。判断基準は REPORT_REVIEW_OPS.md）。',
+      el('label', { style: 'display:block;margin-top:6px' }, dial189, ' 189（児童相談所）へ通告済み — 確定時に通告日時を処理メモへ記録します')));
+  }
   const btnRow = el('div', { class: 'formline' });
   const actions = [
     ['reviewing', '対応中にする', 'btn'],
@@ -1336,33 +1361,153 @@ function buildReportActions(row) {
     if (st === 'reviewing' && row.status !== 'pending') continue; // reviewing→reviewing はDBが拒絶
     const b = el('button', { class: cls }, label);
     b.addEventListener('click', async () => {
-      const noteVal = note.value.trim();
+      let noteVal = note.value.trim();
+      // 189通告の記録を処理メモへ機械可読な形で前置（report_audits に確定内容として残る）
+      if (dial189 && dial189.checked) {
+        noteVal = '【189通告済み ' + new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC】' + (noteVal ? ' ' + noteVal : '');
+      }
       if (st !== 'reviewing' && !noteVal) { toast('確定には処理メモの入力が必須です', true); note.focus(); return; }
       if (looksLikeMyNumber(noteVal)) { toast('個人番号と誤認しうる12桁の数字列はメモに記入できません', true); return; }
-      const msg = 'この通報を「' + REPORT_STATUS_LABEL[st] + '」にします。\n\n'
-        + '理由: ' + (REPORT_REASONS[row.reason] || row.reason) + '\n'
-        + '被通報者: ' + row.reported_user_id + (row.reported_nickname ? '（' + row.reported_nickname + '）' : '')
-        + (noteVal ? '\n処理メモ: ' + noteVal : '')
-        + (st === 'accountSuspended' ? '\n\n※ これは記録です。実際のBANは続けて「ペナルティ」タブで実行してください。' : '')
-        + (st !== 'reviewing' ? '\n\n※ 確定後はこの通報を変更できません。' : '')
-        + '\n\nよろしいですか？';
-      if (!confirm(msg)) return;
-      b.disabled = true;
-      try {
-        await callReviewRpc(S.mode === 'admin' ? 'admin_review_report' : 'review_report',
-          { p_id: row.id, p_status: st, p_note: noteVal });
-        toast('通報を「' + REPORT_STATUS_LABEL[st] + '」にしました');
-        S.reports.openId = null;
-        render();
-      } catch (e) {
-        toast('更新できませんでした: ' + e.message, true);
-        b.disabled = false;
-      }
+      reviewExec(b, {
+        confirmMsg: 'この通報を「' + REPORT_STATUS_LABEL[st] + '」にします。\n\n'
+          + '理由: ' + (REPORT_REASONS[row.reason] || row.reason) + '\n'
+          + '被通報者: ' + row.reported_user_id + (row.reported_nickname ? '（' + row.reported_nickname + '）' : '')
+          + (noteVal ? '\n処理メモ: ' + noteVal : '')
+          + (st === 'accountSuspended' ? '\n\n※ これは記録です。実際のBANは続けて「ペナルティ」タブで実行してください。' : '')
+          + (st !== 'reviewing' ? '\n\n※ 確定後はこの通報を変更できません。' : '')
+          + '\n\nよろしいですか？',
+        fn: S.mode === 'admin' ? 'admin_review_report' : 'review_report',
+        args: { p_id: row.id, p_status: st, p_note: noteVal },
+        okMsg: '通報を「' + REPORT_STATUS_LABEL[st] + '」にしました',
+        errPrefix: '更新できませんでした', st: S.reports,
+      });
     });
     btnRow.append(b);
   }
   box.append(note, warn, btnRow);
   return box;
+}
+
+// ---------- 資格証・届出証明の審査（20260828000001・規約v47.0.0 第2条-B） ----------
+function credStatusBadge(st) {
+  const cls = { pending: 'warn', approved: 'good', rejected: 'bad' }[st] || 'grey';
+  return el('span', { class: 'badge ' + cls }, CRED_STATUS_LABEL[st] || st);
+}
+
+async function fetchCredentialsPage() {
+  const c = S.credentials;
+  const stFilter = c.status === 'all' ? null : c.status;
+  if (S.mode === 'admin') {
+    const rows = await apiJson('/rest/v1/rpc/admin_list_caregiver_credentials?' +
+      rpcQuery({ p_status: stFilter, p_limit: c.limit, p_offset: c.offset }));
+    return { rows, total: NaN }; // 件数RPCなし: ページャは行数ベースの簡易表示
+  }
+  const q = stFilter ? '&status=eq.' + stFilter : '';
+  const res = await api('/rest/v1/caregiver_credentials?select=*&order=created_at.asc,id.asc'
+    + '&limit=' + c.limit + '&offset=' + c.offset + q, { headers: { Prefer: 'count=exact' } });
+  return { rows: await res.json(), total: totalFromRange(res) };
+}
+
+function renderCredentials() {
+  const root = el('div');
+  root.append(el('div', { class: 'callout info' },
+    el('b', null, '資格証・届出証明の審査: '),
+    '画像を目視で確認して「確認済み」または「確認できず」で確定します。'
+    + '確認は画像の目視であり真正性の保証ではありません（規約 第2条-B）。'
+    + '承認・取消は profiles.credential_verified / notification_verified に自動同期されます。'
+    + '画像は審査確定後30日で自動削除（credential-docs-cleanup）。'));
+
+  const chips = el('div', { class: 'toolbar' });
+  const listBox = el('div', { class: 'card' }, el('div', { class: 'placeholder' }, '読込中…'));
+  const pager = el('div', { class: 'pager' });
+  root.append(chips, listBox, pager);
+
+  fillStatusChips(chips, S.credentials,
+    [['pending', '審査中'], ['approved', '確認済み'], ['rejected', '確認できず'], ['all', 'すべて']]);
+  chips.append(reloadBtn());
+
+  loadInto(listBox, async () => {
+    const { rows, total } = await fetchCredentialsPage();
+    if (!alive(root) || fixPageOverflow(S.credentials, rows, total)) return;
+    listBox.textContent = '';
+    if (!rows.length) listBox.append(el('div', { class: 'placeholder' }, '該当する提出はありません'));
+    for (const row of rows) listBox.append(buildCredentialRow(row));
+    fillPager(pager, S.credentials, rows.length, total, '（提出の古い順）');
+  });
+  return root;
+}
+
+function buildCredentialRow(row) {
+  const head = el('div', { class: 'rowcard' },
+    credStatusBadge(row.status),
+    el('span', null, CRED_KIND_LABEL[row.kind] || row.kind,
+      row.qualification_name ? '（' + row.qualification_name + '）' : ''),
+    el('span', { class: 'dim' }, '提出 ' + jst(row.created_at)),
+    el('span', { class: 'dim' }, '提出者 ', idSpan(row.user_id)),
+  );
+  return toggleCard(S.credentials, row, head, buildCredentialDetail);
+}
+
+function buildCredentialDetail(row) {
+  const d = el('div', { class: 'detail', onclick: e => e.stopPropagation() });
+
+  // 左: 書類画像（credential-docs バケット・管理者SELECTポリシーで取得）
+  const left = mediaBox(CRED_KIND_LABEL[row.kind] || row.kind, row.document_path, null, { bucket: CRED_BUCKET });
+
+  // 右: 事実関係
+  const facts = el('dl', { class: 'facts' },
+    el('dt', null, '提出ID'), el('dd', null, idSpan(row.id)),
+    el('dt', null, '種別'), el('dd', null, (CRED_KIND_LABEL[row.kind] || row.kind)
+      + (row.qualification_name ? '（' + row.qualification_name + '）' : '')),
+    el('dt', null, 'ステータス'), el('dd', null, credStatusBadge(row.status)),
+    el('dt', null, '提出者ID'), el('dd', null, idSpan(row.user_id)),
+    el('dt', null, '提出日時'), el('dd', null, jst(row.created_at)),
+    el('dt', null, '審査日時'), el('dd', null, jst(row.reviewed_at)),
+    el('dt', null, '却下理由'), el('dd', null, row.rejection_reason || el('span', { class: 'null' }, 'なし')),
+  );
+
+  // 下段: 審査操作（pending のみ。RPCがDB側でも pending 以外を拒絶する）
+  const bottom = el('div', { class: 'full' });
+  if (row.status !== 'pending') {
+    bottom.append(el('div', { class: 'dim', style: 'font-size:12px' },
+      '確定済み（' + (CRED_STATUS_LABEL[row.status] || row.status) + '）のため変更できません。'));
+  } else {
+    const box = el('div', { class: 'sqlbox' });
+    box.append(el('h4', null, '審査操作'),
+      el('div', { class: 'dim', style: 'font-size:12px' },
+        '確認の観点: 書類の種別が申告と一致するか（資格証は資格名・氏名欄の体裁 / 届出証明は自治体の受領印・宛名）、'
+        + '画像が鮮明で加工痕がないか。⚠ 目視確認であり真正性の保証ではない。個人番号・氏名・住所をメモに書かない。'));
+    const note = el('textarea', { rows: '2', style: 'width:100%;margin-top:6px', maxlength: '500',
+      placeholder: '審査メモ（内部用・利用者には表示されません）' });
+    const reason = el('textarea', { rows: '2', style: 'width:100%;margin-top:6px', maxlength: '500',
+      placeholder: '確認できなかった理由（「確認できず」の確定時は必須・利用者に表示されます）' });
+    const btnRow = el('div', { class: 'formline' });
+    for (const [st, label, cls] of [['approved', '確認済みで確定', 'btn primary'], ['rejected', '確認できずで確定', 'btn']]) {
+      const b = el('button', { class: cls }, label);
+      b.addEventListener('click', () => {
+        const reasonVal = reason.value.trim();
+        if (st === 'rejected' && !reasonVal) { toast('「確認できず」の確定には理由の入力が必須です', true); reason.focus(); return; }
+        reviewExec(b, {
+          confirmMsg: 'この提出を「' + CRED_STATUS_LABEL[st] + '」にします。\n\n'
+            + '種別: ' + (CRED_KIND_LABEL[row.kind] || row.kind)
+            + (row.qualification_name ? '（' + row.qualification_name + '）' : '') + '\n'
+            + '提出者: ' + row.user_id
+            + (st === 'approved' ? '\n\n※ profiles のバッジ列に自動同期されます。' : '')
+            + '\n\nよろしいですか？',
+          fn: S.mode === 'admin' ? 'admin_review_caregiver_credential' : 'review_caregiver_credential',
+          args: { p_id: row.id, p_status: st, p_note: note.value.trim(), p_rejection_reason: reasonVal },
+          okMsg: '提出を「' + CRED_STATUS_LABEL[st] + '」にしました',
+          errPrefix: '更新できませんでした', st: S.credentials,
+        });
+      });
+      btnRow.append(b);
+    }
+    box.append(note, reason, btnRow);
+    bottom.append(box);
+  }
+
+  d.append(left, el('div', null, facts), bottom);
+  return d;
 }
 
 // ---------- テーブル ----------
@@ -1407,7 +1552,7 @@ function penaltyBanBadge(bannedUntil) {
 
 function penaltyAction(row, fn, args, actionLabel, extraWarn) {
   const b = el('button', { class: 'btn' }, actionLabel);
-  b.addEventListener('click', async () => {
+  b.addEventListener('click', () => {
     const note = prompt(
       '処分メモ（必須・利用者には表示されません）\n'
       + '対象: ' + (row.nickname || '（表示名なし）') + ' / ' + (row.member_id || row.user_id) + '\n'
@@ -1415,20 +1560,15 @@ function penaltyAction(row, fn, args, actionLabel, extraWarn) {
       + '根拠となる通報IDや判断理由を記入してください。個人番号・氏名・住所は書かない。');
     if (note === null) return;
     if (!note.trim()) { toast('処分メモは必須です', true); return; }
-    const msg = '「' + (row.nickname || row.user_id) + '」に対して『' + actionLabel + '』を実行します。\n'
-      + '通報 ' + row.report_total + ' 件 / 被ブロック ' + row.block_count + ' 件\n'
-      + (extraWarn ? '\n' + extraWarn + '\n' : '')
-      + '\nよろしいですか？';
-    if (!confirm(msg)) return;
-    b.disabled = true;
-    try {
-      await callReviewRpc(fn, Object.assign({ p_user_id: row.user_id, p_note: note.trim() }, args));
-      toast('『' + actionLabel + '』を実行しました（moderation_audits に記録済み）');
-      render();
-    } catch (e) {
-      toast('実行できませんでした: ' + e.message, true);
-      b.disabled = false;
-    }
+    reviewExec(b, {
+      confirmMsg: '「' + (row.nickname || row.user_id) + '」に対して『' + actionLabel + '』を実行します。\n'
+        + '通報 ' + row.report_total + ' 件 / 被ブロック ' + row.block_count + ' 件\n'
+        + (extraWarn ? '\n' + extraWarn + '\n' : '')
+        + '\nよろしいですか？',
+      fn, args: Object.assign({ p_user_id: row.user_id, p_note: note.trim() }, args),
+      okMsg: '『' + actionLabel + '』を実行しました（moderation_audits に記録済み）',
+      errPrefix: '実行できませんでした',
+    });
   });
   return b;
 }
@@ -1484,36 +1624,23 @@ function renderPenalty() {
   };
   bar.append(...mkNum('通報', 'minReports'), el('span', { class: 'dim' }, '件以上 または'),
     ...mkNum('被ブロック', 'minBlocks'), el('span', { class: 'dim' }, '件以上'),
-    el('button', { class: 'btn', style: 'margin-left:auto', onclick: () => render() }, '再読込'));
+    reloadBtn());
 
   const listBox = el('div', { class: 'card' }, el('div', { class: 'placeholder' }, '読込中…'));
   const pager = el('div', { class: 'pager' });
   root.append(bar, listBox, pager);
 
-  (async () => {
-    try {
-      const rows = await fetchPenaltyPage();
-      if (!alive(root)) return;
-      listBox.textContent = '';
-      if (!rows.length) {
-        listBox.append(el('div', { class: 'placeholder' },
-          '閾値（通報' + S.penalty.minReports + '件以上 または 被ブロック' + S.penalty.minBlocks + '件以上）に該当するアカウントはありません'));
-      }
-      for (const row of rows) listBox.append(buildPenaltyRow(row));
-
-      pager.textContent = '';
-      const from = rows.length ? S.penalty.offset + 1 : 0;
-      const to = S.penalty.offset + rows.length;
-      pager.append(
-        el('button', { class: 'btn', disabled: S.penalty.offset === 0 ? '' : null,
-          onclick: () => { S.penalty.offset = Math.max(0, S.penalty.offset - S.penalty.limit); render(); } }, '前へ'),
-        el('span', null, from + '–' + to + ' 件（通報＋被ブロック合計の多い順）'),
-        el('button', { class: 'btn', disabled: rows.length < S.penalty.limit ? '' : null,
-          onclick: () => { S.penalty.offset += S.penalty.limit; render(); } }, '次へ'));
-    } catch (e) {
-      if (alive(root)) { listBox.textContent = ''; listBox.append(el('div', { class: 'placeholder' }, '読込失敗: ' + e.message)); }
+  loadInto(listBox, async () => {
+    const rows = await fetchPenaltyPage();
+    if (!alive(root)) return;
+    listBox.textContent = '';
+    if (!rows.length) {
+      listBox.append(el('div', { class: 'placeholder' },
+        '閾値（通報' + S.penalty.minReports + '件以上 または 被ブロック' + S.penalty.minBlocks + '件以上）に該当するアカウントはありません'));
     }
-  })();
+    for (const row of rows) listBox.append(buildPenaltyRow(row));
+    fillPager(pager, S.penalty, rows.length, NaN, '（通報＋被ブロック合計の多い順）');
+  });
   return root;
 }
 
@@ -1555,8 +1682,7 @@ function renderDeletions() {
   const pager = el('div', { class: 'pager' });
   root.append(summaryBox, listBox, pager);
 
-  (async () => {
-    try {
+  loadInto(listBox, async () => {
       const rows = await fetchDeletions();
       if (!alive(root)) return;
 
@@ -1592,19 +1718,8 @@ function renderDeletions() {
           el('span', null, deletionReasonText(row))));
       }
 
-      pager.textContent = '';
-      const from = rows.length ? S.deletions.offset + 1 : 0;
-      const to = S.deletions.offset + rows.length;
-      pager.append(
-        el('button', { class: 'btn', disabled: S.deletions.offset === 0 ? '' : null,
-          onclick: () => { S.deletions.offset = Math.max(0, S.deletions.offset - S.deletions.limit); render(); } }, '前へ'),
-        el('span', null, from + '–' + to + ' 件（新しい順）'),
-        el('button', { class: 'btn', disabled: rows.length < S.deletions.limit ? '' : null,
-          onclick: () => { S.deletions.offset += S.deletions.limit; render(); } }, '次へ'));
-    } catch (e) {
-      if (alive(root)) { listBox.textContent = ''; listBox.append(el('div', { class: 'placeholder' }, '読込失敗: ' + e.message)); }
-    }
-  })();
+      fillPager(pager, S.deletions, rows.length, NaN, '（新しい順）');
+  });
   return root;
 }
 
@@ -1640,19 +1755,15 @@ function renderDup() {
   const backfillBox = el('div', { class: 'card' }, el('div', { class: 'placeholder' }, '転記待ちを読込中…'));
   root.append(el('h3', null, '転記待ち（承認済み・person_id未登録）'), backfillBox);
 
-  (async () => {
-    try {
-      const rows = await apiJson('/rest/v1/rpc/admin_list_person_key_backfill');
-      if (!alive(root)) return;
-      backfillBox.textContent = '';
-      if (!rows.length) {
-        backfillBox.append(el('div', { class: 'placeholder' }, '転記待ちはありません'));
-      }
-      for (const row of rows) backfillBox.append(buildBackfillRow(row));
-    } catch (e) {
-      if (alive(root)) { backfillBox.textContent = ''; backfillBox.append(el('div', { class: 'placeholder' }, '読込失敗: ' + e.message)); }
+  loadInto(backfillBox, async () => {
+    const rows = await apiJson('/rest/v1/rpc/admin_list_person_key_backfill');
+    if (!alive(root)) return;
+    backfillBox.textContent = '';
+    if (!rows.length) {
+      backfillBox.append(el('div', { class: 'placeholder' }, '転記待ちはありません'));
     }
-  })();
+    for (const row of rows) backfillBox.append(buildBackfillRow(row));
+  });
 
   // --- 重複フラグ一覧 ---
   const statusSel = el('select', null, Object.entries(DUP_STATUS_LABEL).map(([v, label]) =>
@@ -1660,25 +1771,20 @@ function renderDup() {
   statusSel.addEventListener('change', () => { S.dup.status = statusSel.value; render(); });
   const flagBox = el('div', { class: 'card' }, el('div', { class: 'placeholder' }, 'フラグを読込中…'));
   root.append(el('h3', null, '重複人物フラグ'),
-    el('div', { class: 'toolbar' }, el('span', { class: 'dim' }, '状態'), statusSel,
-      el('button', { class: 'btn', style: 'margin-left:auto', onclick: () => render() }, '再読込')),
+    el('div', { class: 'toolbar' }, el('span', { class: 'dim' }, '状態'), statusSel, reloadBtn()),
     flagBox);
 
-  (async () => {
-    try {
-      const rows = await apiJson('/rest/v1/rpc/admin_list_duplicate_flags?'
-        + rpcQuery({ p_status: S.dup.status }));
-      if (!alive(root)) return;
-      flagBox.textContent = '';
-      if (!rows.length) {
-        flagBox.append(el('div', { class: 'placeholder' },
-          '「' + DUP_STATUS_LABEL[S.dup.status] + '」のフラグはありません'));
-      }
-      for (const row of rows) flagBox.append(buildDupFlagRow(row));
-    } catch (e) {
-      if (alive(root)) { flagBox.textContent = ''; flagBox.append(el('div', { class: 'placeholder' }, '読込失敗: ' + e.message)); }
+  loadInto(flagBox, async () => {
+    const rows = await apiJson('/rest/v1/rpc/admin_list_duplicate_flags?'
+      + rpcQuery({ p_status: S.dup.status }));
+    if (!alive(root)) return;
+    flagBox.textContent = '';
+    if (!rows.length) {
+      flagBox.append(el('div', { class: 'placeholder' },
+        '「' + DUP_STATUS_LABEL[S.dup.status] + '」のフラグはありません'));
     }
-  })();
+    for (const row of rows) flagBox.append(buildDupFlagRow(row));
+  });
   return root;
 }
 
@@ -1855,8 +1961,6 @@ function loadTableRows(main) {
   if (t.fCol && t.fVal !== '') {
     const v = t.fOp === 'ilike' ? '*' + t.fVal + '*' : t.fVal;
     params.push(encodeURIComponent(t.fCol) + '=' + t.fOp + '.' + encodeURIComponent(v));
-  } else if (t.fCol && t.fOp === 'is') {
-    params.push(encodeURIComponent(t.fCol) + '=is.null');
   }
   api('/rest/v1/' + encodeURIComponent(t.current) + '?' + params.join('&'), { headers: { Prefer: 'count=exact' } })
     .then(async res => {
@@ -2086,25 +2190,30 @@ document.getElementById('lbFit').addEventListener('click', () => document.getEle
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLightbox(); });
 
 // ---------- ルーティング ----------
+// タブ名 → 描画関数のレジストリ（serviceOnly は service_role 接続のPC専用タブ）
+const TABS = {
+  review: { render: renderReview },
+  reports: { render: renderReports },
+  credentials: { render: renderCredentials },
+  penalty: { render: renderPenalty },
+  deletions: { render: renderDeletions },
+  dup: { render: renderDup },
+  tables: { render: renderTables, serviceOnly: true },
+  storage: { render: renderStorage, serviceOnly: true },
+  users: { render: renderUsers, serviceOnly: true },
+};
 function render() {
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === S.tab));
   const v = document.getElementById('view');
   v.textContent = '';
   if (!S.key) { v.append(renderConnect()); return; }
-  if (S.mode === 'admin' && S.tab !== 'review' && S.tab !== 'reports'
-      && S.tab !== 'penalty' && S.tab !== 'dup' && S.tab !== 'deletions') {
+  const tab = TABS[S.tab] || TABS.review;
+  if (S.mode === 'admin' && tab.serviceOnly) {
     v.append(el('div', { class: 'placeholder card' },
-      'このタブは service_role 接続時のみ利用できます（管理者ログインは審査キュー・通報審査・ペナルティ・退会・重複転記専用です）'));
+      'このタブは service_role 接続時のみ利用できます（管理者ログインは審査キュー・通報審査・資格届出・ペナルティ・退会・重複転記専用です）'));
     return;
   }
-  if (S.tab === 'review') v.append(renderReview());
-  else if (S.tab === 'reports') v.append(renderReports());
-  else if (S.tab === 'penalty') v.append(renderPenalty());
-  else if (S.tab === 'deletions') v.append(renderDeletions());
-  else if (S.tab === 'dup') v.append(renderDup());
-  else if (S.tab === 'tables') v.append(renderTables());
-  else if (S.tab === 'storage') v.append(renderStorage());
-  else if (S.tab === 'users') v.append(renderUsers());
+  v.append(tab.render());
 }
 document.querySelectorAll('nav button').forEach(b =>
   b.addEventListener('click', () => { S.tab = b.dataset.tab; render(); }));
@@ -2124,7 +2233,11 @@ try {
   sessionStorage.removeItem(SS_KEY);
   if (saved) {
     const s = JSON.parse(saved);
-    if (s.mode === 'admin' && s.key) {
+    // savedAt が無い保存値は SESSION_MAX_AGE_MS 導入前のもの＝寿命不明。
+    // 期限切れ扱いにして一度だけ再ログインしてもらう（監査P2-15）。
+    const fresh = typeof s.savedAt === 'number'
+      && (Date.now() - s.savedAt) < SESSION_MAX_AGE_MS;
+    if (s.mode === 'admin' && s.key && fresh) {
       S.url = s.url; S.key = s.key;
       S.mode = 'admin';
       S.refreshToken = s.refreshToken || '';
