@@ -247,13 +247,16 @@ const REPORT_REASONS = {
   spam: '業者・スパム・宣伝行為',
   childPhotoMisuse: '子どもの写真・情報の無断使用',
   childAbuseSuspected: '子どもへの虐待・ネグレクトの疑い',
+  seriousAccident: '預かり中の重大な事故・ケガ',
   stalkingThreat: '脅迫・ストーカー行為',
   sexualHarassment: '性的な嫌がらせ',
   other: 'その他',
 };
 // 子どもの安全カテゴリ（childSafety）: 児童虐待防止法6条の通告義務の運用対象
 // （REPORT_REVIEW_OPS.md の通告基準を参照）
-const CHILD_SAFETY_REASONS = ['minorContact', 'childPhotoMisuse', 'childAbuseSuspected'];
+// seriousAccident も含める: 事故とネグレクトは併存しうるため、事故として上がった
+// 通報でも189通告の判断を必ず1回通す（自治体への情報提供は別建て・同OPS参照）
+const CHILD_SAFETY_REASONS = ['minorContact', 'childPhotoMisuse', 'childAbuseSuspected', 'seriousAccident'];
 // 資格証・届出証明の審査タブは2026-08-30に撤去（収集自体を08-29に廃止・
 // 20260829000009でINSERT権限剥奪＋pending行削除済みのため、新規提出は来ない。
 // 確定済み行の履歴はテーブルタブ(caregiver_credentials・service接続)で閲覧可能）
@@ -1797,11 +1800,31 @@ function buildDupFlagRow(row) {
   return box;
 }
 
+// 通覧規程を「開く場所」に出す。紙に書いても開く瞬間には読まないため
+// （README「テーブルタブの通覧規程」と対。法令発火点台帳 06）。
+// PP 利用目的⑪で利用者に約束しているのは「審査の目的で確認することがある」まで。
+// 目的外の通覧は、法令以前に自分で書いた約束に反する。
+function renderTablesNotice() {
+  return el('div', {
+    class: 'card',
+    style: 'padding:10px 12px;margin-bottom:12px;border-left:3px solid var(--warn);font-size:13px',
+  },
+    el('div', { style: 'font-weight:700;margin-bottom:4px' }, 'テーブル通覧のルール'),
+    el('div', null,
+      '運営の定型業務では、必要なテーブルを開いてかまいません（書類審査・通報審査・退会/退会失敗の監視・ペナルティ・重複転記・障害調査・法令にもとづく要請）。'),
+    el('div', { style: 'color:var(--warn);margin-top:4px' },
+      '⚠ ただし mail_messages.body（利用者間のメール本文）を開くのは、通報審査で内容確認が必要なときと、法令にもとづく要請のときだけ。'),
+    el('div', { class: 'dim', style: 'margin-top:4px' },
+      '本文を見たときは、対応中の通報の処理メモに1行残す。業務にひもづかない通覧はしない。'));
+}
+
 function renderTables() {
-  const root = el('div', { class: 'layout' });
+  const root = el('div', null);
+  const layout = el('div', { class: 'layout' });
   const side = el('div', { class: 'side' }, el('div', { class: 'placeholder' }, '読込中…'));
   const main = el('div', null, el('div', { class: 'placeholder card' }, '左の一覧からテーブルを選択'));
-  root.append(side, main);
+  layout.append(side, main);
+  root.append(renderTablesNotice(), layout);
   ensureSwagger().then(() => {
     if (!alive(side)) return;
     side.textContent = '';
