@@ -313,6 +313,8 @@ const REVIEW_RPCS = [
   'register_admin_push_subscription', 'unregister_admin_push_subscription',
   // person_id転記・重複フラグ審査（20260803000001・is_admin()がDB側で強制）
   'admin_register_person_keys', 'admin_review_duplicate_flag',
+  // 直前キャンセル減点の是正（20260903000001・is_admin()がDB側で強制）
+  'admin_reset_late_cancel_penalty',
 ];
 function assertAllowed(method, path) {
   const m = method.toUpperCase();
@@ -1478,6 +1480,9 @@ function buildPenaltyRow(row) {
       penaltyAction(row, 'admin_force_delete_user', {}, '強制退会（アカウント削除）',
         '※ 元に戻せません。通常はまず停止し、異議がなければ退会を確定してください。'));
   }
+  // 直前キャンセル減点の是正（1回の実行で誤検知1件分だけ戻す。減点が無ければDB側でエラー）
+  acts.append(penaltyAction(row, 'admin_reset_late_cancel_penalty', {}, '直前キャンセル減点を1回分戻す',
+    '※ 減点が無い利用者に実行するとエラーになります。ブラックリスト解除は別操作です。'));
   card.append(head, acts);
   return card;
 }
