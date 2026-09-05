@@ -880,11 +880,12 @@ function renderReview() {
     '審査より先に Studio → Storage で該当オブジェクトを即削除（保管自体が違法・番号法20条）。このビューアからは削除できません。個人番号・氏名・住所を却下理由やメモに絶対に転記しないこと。'));
   root.append(memberIdSearchBar());
 
+  const heartbeat = el('div', { class: 'toolbar', style: 'font-size:12px' });
   const chips = el('div', { class: 'toolbar' });
   const breakdown = el('div', { class: 'toolbar', style: 'font-size:12px' });
   const listBox = el('div', { class: 'card' }, el('div', { class: 'placeholder' }, '読込中…'));
   const pager = el('div', { class: 'pager' });
-  root.append(chips, breakdown, listBox, pager);
+  root.append(heartbeat, chips, breakdown, listBox, pager);
 
   // 保留内訳は一覧の読み込みとは独立させる（この集計だけ失敗しても一覧表示は妨げない）
   (async () => {
@@ -912,8 +913,11 @@ function renderReview() {
   })();
 
   loadInto(listBox, async () => {
-    const { counts, rows, total } = await fetchReviewPage();
+    // 稼働記録は各行の「未判定/判定済み」バッジの基準なので一覧と同時に取る（取得失敗でも一覧は出す）
+    const [{ counts, rows, total }, hb] = await Promise.all([fetchReviewPage(), fetchHeartbeat()]);
     if (!alive(root) || fixPageOverflow(S.review, rows, total)) return;
+    S.review.heartbeat = hb;
+    fillHeartbeatLine(heartbeat, hb);
     fillStatusChips(chips, S.review, [
       ['pending', STATUS_LABEL.pending + ' ' + counts[0]],
       ['approved', STATUS_LABEL.approved + ' ' + counts[1]],
@@ -944,6 +948,47 @@ function staleBadge(row) {
   return el('span', { class: 'badge ' + cls, title: '申請から' + days + '日経過（滞留の目安: ' + STALE_WARN_DAYS + '日）' }, days + '日経過');
 }
 
+// 自動判定バッチ（ekyc_pipeline/run_pending_review.py --apply・毎時）の稼働記録
+// （migration 20260906000001）。取得失敗は undefined（表示だけ諦め、一覧は妨げない）
+const HEARTBEAT_STALE_HOURS = 26;
+async function fetchHeartbeat() {
+  try {
+    if (S.mode === 'admin') return await apiJson('/rest/v1/rpc/admin_get_ops_heartbeat?' + rpcQuery({ p_name: 'ekyc_pending_review' }));
+    const rows = await apiJson('/rest/v1/ops_heartbeats?select=name,ran_at,detail&name=eq.ekyc_pending_review');
+    return rows[0] || null;
+  } catch (e) { return undefined; }
+}
+function fillHeartbeatLine(box, hb) {
+  box.textContent = '';
+  if (hb === undefined) { box.append(el('span', { class: 'dim' }, '自動判定バッチの稼働記録を取得できませんでした')); return; }
+  const hours = hb ? (Date.now() - new Date(hb.ran_at).getTime()) / 36e5 : Infinity;
+  const d = (hb && hb.detail) || {};
+  const summary = hb
+    ? '自動判定バッチ 最終実行: ' + (hours < 1 ? Math.round(hours * 60) + '分前' : Math.round(hours) + '時間前') +
+      '（' + jst(hb.ran_at) + '・自動承認 ' + (d.approved || 0) + '件・ヒント更新 ' + (d.hinted || 0) + '件' +
+      (d.errors ? '・処理失敗 ' + d.errors + '件' : '') + '）'
+    : '自動判定バッチ 最終実行: 記録なし（一度も動いていません）';
+  if (hours >= HEARTBEAT_STALE_HOURS) {
+    box.append(el('div', { class: 'callout', style: 'margin:0;flex:1' }, el('b', null, 'バッチが止まっています。'), ' ' + summary +
+      ' — 運営PCのタスクスケジューラ「Amicuna eKYC 審査バッチ」と ekyc_pipeline/logs を確認してください（審査待ちは目視で進められます）'));
+  } else {
+    box.append(el('span', { class: 'dim' }, summary));
+  }
+}
+// 自動判定バッチが見た行か。申請が最終実行より前なら一度は判定済み。
+// ヒント列（face_match_score 等）は提出時の自己申告値でも埋まるため判定には使わない
+function aiJudgedBadge(row) {
+  const hb = S.review.heartbeat;
+  if (row.status !== 'pending' || hb === undefined) return null;
+  if (!hb || new Date(row.created_at) > new Date(hb.ran_at)) {
+    return el('span', { class: 'badge warn', title: '自動判定バッチ（毎時）がまだこの申請を見ていません。急ぐなら目視審査で進めてよい' }, '未判定（バッチ待ち）');
+  }
+  if (((hb.detail || {}).failed_ids || []).includes(row.id)) {
+    return el('span', { class: 'badge bad', title: '前回のバッチでこの行の処理が例外で失敗。ekyc_pipeline/logs の❌行を確認。目視審査は可能' }, '自動判定エラー（目視へ）');
+  }
+  return el('span', { class: 'badge grey', title: '自動判定バッチが処理済み。承認条件に達しなかった（免許証系は性別の目視が必須）ため目視審査へ' }, '自動判定済み（承認条件未達＝目視へ）');
+}
+
 function buildReviewRow(row) {
   const head = el('div', { class: 'rowcard' },
     statusBadge(row.status),
@@ -951,6 +996,7 @@ function buildReviewRow(row) {
     el('span', { class: 'dim' }, '申請 ' + jst(row.created_at)),
     el('span', { class: 'dim' }, '利用者 ', idSpan(row.user_id)),
     scoreBadge(row.face_match_score),
+    aiJudgedBadge(row),
     staleBadge(row),
     row.selfie_path ? null : el('span', { class: 'badge warn', title: '2026-07-10以前の旧申請' }, '自撮りなし'),
     row.gender_on_document ? el('span', { class: 'badge grey' }, '転記: ' + (GENDER_LABEL[row.gender_on_document] || row.gender_on_document)) : null,
