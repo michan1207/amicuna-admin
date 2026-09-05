@@ -252,10 +252,9 @@ const REPORT_REASONS = {
   sexualHarassment: '性的な嫌がらせ',
   other: 'その他',
 };
-// 子どもの安全カテゴリ（childSafety）: 児童虐待防止法6条の通告義務の運用対象
-// （REPORT_REVIEW_OPS.md の通告基準を参照）
-// seriousAccident も含める: 事故とネグレクトは併存しうるため、事故として上がった
-// 通報でも189通告の判断を必ず1回通す（自治体への情報提供は別建て・同OPS参照）
+// 子どもの安全カテゴリ（childSafety）: 運営は189通告の主体にならず、通報者へ
+// 189/110 をご自身で相談するよう案内する（2026-09-05 ユーザー決定・規約第16条・
+// REPORT_REVIEW_OPS.md）。seriousAccident も同じ案内の対象。
 const CHILD_SAFETY_REASONS = ['minorContact', 'childPhotoMisuse', 'childAbuseSuspected', 'seriousAccident'];
 // 資格証・届出証明の審査タブは2026-08-30に撤去（収集自体を08-29に廃止・
 // 20260829000009でINSERT権限剥奪＋pending行削除済みのため、新規提出は来ない。
@@ -1342,15 +1341,11 @@ function buildReportActions(row) {
     warn.textContent = looksLikeMyNumber(note.value)
       ? '⚠ 12桁の数字列（個人番号様）が含まれています。メモへの転記は禁止です。' : '';
   });
-  // 子どもの安全カテゴリ: 189通告の記録（児童虐待防止法6条・REPORT_REVIEW_OPS.md）
-  const isChildSafety = CHILD_SAFETY_REASONS.includes(row.reason);
-  let dial189 = null;
-  if (isChildSafety) {
-    dial189 = el('input', { type: 'checkbox', id: 'dial189_' + row.id });
+  // 子どもの安全カテゴリ: 運営は通告しない（規約第16条）。通報者への案内のみ
+  if (CHILD_SAFETY_REASONS.includes(row.reason)) {
     box.append(el('div', { style: 'margin-top:8px;padding:8px 10px;border:1px solid #c33;border-radius:6px;font-size:12px' },
       el('b', null, '🚨 子どもの安全カテゴリ: '),
-      '虐待・ネグレクトの疑いが合理的に否定できない場合は、確定の前に児童相談所 189 へ通告する（通告は児童虐待防止法6条にもとづく義務であり、守秘義務違反にならない。判断基準は REPORT_REVIEW_OPS.md）。',
-      el('label', { style: 'display:block;margin-top:6px' }, dial189, ' 189（児童相談所）へ通告済み — 確定時に通告日時を処理メモへ記録します')));
+      '運営は児童相談所への通告を行いません（利用規約 第16条）。通報者へ「189（児童相談所）・110（警察）はご自身で相談してください」と案内し、案内した事実を処理メモに残してください。'));
   }
   const btnRow = el('div', { class: 'formline' });
   const actions = [
@@ -1364,10 +1359,6 @@ function buildReportActions(row) {
     const b = el('button', { class: cls }, label);
     b.addEventListener('click', async () => {
       let noteVal = note.value.trim();
-      // 189通告の記録を処理メモへ機械可読な形で前置（report_audits に確定内容として残る）
-      if (dial189 && dial189.checked) {
-        noteVal = '【189通告済み ' + new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC】' + (noteVal ? ' ' + noteVal : '');
-      }
       if (st !== 'reviewing' && !noteVal) { toast('確定には処理メモの入力が必須です', true); note.focus(); return; }
       if (looksLikeMyNumber(noteVal)) { toast('個人番号と誤認しうる12桁の数字列はメモに記入できません', true); return; }
       reviewExec(b, {
