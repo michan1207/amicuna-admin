@@ -149,6 +149,7 @@
     <button data-tab="review">審査キュー</button>
     <button data-tab="reports">通報審査</button>
     <button data-tab="penalty">ペナルティ</button>
+    <button data-tab="counts">利用者数</button>
     <button data-tab="deletions">退会</button>
     <button data-tab="dup">重複・転記</button>
     <button data-tab="tables">テーブル</button>
@@ -375,6 +376,12 @@ async function refreshPushUiState() {
     S.push.subscribed = false;
   }
 }
+async function registerPushSubscription(sub) {
+  const j = sub.toJSON();
+  await callReviewRpc('register_admin_push_subscription', {
+    p_endpoint: j.endpoint, p_p256dh: j.keys.p256dh, p_auth: j.keys.auth,
+  });
+}
 async function enablePushNotifications() {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
     toast('このブラウザはプッシュ通知に対応していません'); return;
@@ -395,10 +402,7 @@ async function enablePushNotifications() {
     userVisibleOnly: true,
     applicationServerKey: urlBase64ToUint8Array(PUSH_VAPID_PUBLIC_KEY),
   });
-  const j = sub.toJSON();
-  await callReviewRpc('register_admin_push_subscription', {
-    p_endpoint: j.endpoint, p_p256dh: j.keys.p256dh, p_auth: j.keys.auth,
-  });
+  await registerPushSubscription(sub);
   S.push.subscribed = true;
   try { localStorage.removeItem(PUSH_OFF_KEY); } catch (e) { /* 保存不可環境は無視 */ }
   toast('プッシュ通知を有効にしました');
@@ -415,7 +419,11 @@ async function ensurePushSubscribed() {
   try {
     await refreshPushUiState();
     if (localStorage.getItem(PUSH_OFF_KEY)) return;
-    if (!S.push.subscribed && 'Notification' in window && Notification.permission === 'granted') {
+    const sub = await getPushSubscription();
+    if (sub) {
+      // サーバーの宛先だけ消えていても、開くたびに載せ直す（同じ宛先は上書き）
+      await registerPushSubscription(sub);
+    } else if ('Notification' in window && Notification.permission === 'granted') {
       await enablePushNotifications();
     }
   } catch (e) { /* 自動維持の失敗は無視（ボタンから手動で復旧できる） */ }
@@ -737,26 +745,14 @@ async function loginAdmin(url, email, password, save) {
   render();
 }
 function disconnect() {
-  // adminモードは Push購読の解除 → サーバー側セッションの失効 の順で後始末する
-  // （fire-and-forget・失敗しても切断は続行）。購読を残すと端末を手放したあとも
-  // 審査通知が届き続けるため、明示的な切断時はサーバー側からも購読を消す。
-  // logout でトークンが失効する前に解除RPCを呼ぶ必要があるため直列にし、
-  // S はこの直後にクリアされるので url/key はここで捕捉しておく。
+  // サーバー側セッションだけを失効させる（fire-and-forget）。通知の購読は残す:
+  // セッション切れでも自動でここへ来るので、解除すると気づかないまま通知が
+  // 止まる。止めるのは「通知オン」ボタンだけ。端末を手放す前はボタンで切る。
   if (S.mode === 'admin' && S.key) {
-    const url = S.url, key = S.key;
-    const logout = () => fetch(url + '/auth/v1/logout', {
+    fetch(S.url + '/auth/v1/logout', {
       method: 'POST',
-      headers: { apikey: PUBLISHABLE_KEY, Authorization: 'Bearer ' + key },
+      headers: { apikey: PUBLISHABLE_KEY, Authorization: 'Bearer ' + S.key },
     }).catch(() => {});
-    getPushSubscription().then(sub => {
-      if (!sub) return;
-      return fetch(url + '/rest/v1/rpc/unregister_admin_push_subscription', {
-        method: 'POST',
-        headers: { apikey: PUBLISHABLE_KEY, Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ p_endpoint: sub.endpoint }),
-      }).then(() => sub.unsubscribe());
-    }).catch(() => {}).then(logout, logout);
-    S.push.subscribed = false;
   }
   try { localStorage.removeItem(SS_KEY); sessionStorage.removeItem(SS_KEY); } catch (e) { /* ストレージ不可環境では何もしない */ }
   S.url = ''; S.key = ''; S.refreshToken = ''; S.mode = 'service'; S.persist = false; S.swagger = null;
@@ -1564,6 +1560,60 @@ function renderPenalty() {
   return root;
 }
 
+// ---------- 利用者数（20261124000001_admin_user_counts.sql。人数だけ・閲覧専用） ----------
+const COUNT_GROUPS = [
+  ['登録の流れ', [
+    ['signed_in', 'ログインした人'],
+    ['identity_submitted', '本人確認を出した人'],
+    ['identity_pending', 'うち審査待ち', true],
+    ['identity_approved', '本人確認が済んだ人'],
+    ['profile_completed', 'プロフィールが完成した人'],
+    ['parents', 'うち保護者', true],
+    ['caregivers', 'うち保育者', true],
+  ]],
+  ['アプリを起動した人（プロフィール完成者のうち）', [
+    ['active_today', '今日'],
+    ['active_7d', '7日以内'],
+    ['active_30d', '30日以内'],
+  ]],
+];
+
+function renderCounts() {
+  const root = el('div');
+  root.append(el('div', { class: 'callout info' },
+    el('b', null, '利用者数: '),
+    'Android と iPhone を合わせた、開いた時点の人数です。運営・審査用の8アカウントと'
+    + '匿名のログインは含みません（知り合いのテスト利用者は含みます）。'));
+  const box = el('div', { class: 'card', style: 'padding:4px 14px 14px' });
+  const load = () => {
+    box.textContent = '';
+    box.append(el('div', { class: 'placeholder' }, '読込中…'));
+    loadInto(box, async () => {
+      const [c] = await apiJson('/rest/v1/rpc/admin_user_counts');
+      if (!alive(root)) return;
+      box.textContent = '';
+      if (!c) {
+        box.append(el('div', { class: 'placeholder' }, '管理者ログインで開いてください'));
+        return;
+      }
+      for (const [title, rows] of COUNT_GROUPS) {
+        box.append(el('div', { style: 'margin-top:12px' }, el('b', null, title)));
+        for (const [key, label, sub] of rows) {
+          box.append(el('div', {
+            style: 'display:flex;justify-content:space-between;max-width:420px;padding:6px 0'
+              + (sub ? ' 6px 16px' : ''),
+          }, el('span', sub ? { class: 'dim' } : null, label), el('b', null, c[key] + '人')));
+        }
+      }
+      box.append(el('div', { class: 'dim', style: 'margin:12px 0' }, jst(c.counted_at) + ' 時点'),
+        el('button', { class: 'btn', onclick: load }, '最新の人数にする'));
+    });
+  };
+  root.append(box);
+  load();
+  return root;
+}
+
 // ---------- 退会（account_deletions の理由・進捗閲覧） ----------
 // 20260805000011_account_deletions_admin_list.sql の RPC を使用。閲覧専用。
 const DELETION_STATUS_LABEL = {
@@ -2135,6 +2185,7 @@ const TABS = {
   review: { render: renderReview },
   reports: { render: renderReports },
   penalty: { render: renderPenalty },
+  counts: { render: renderCounts },
   deletions: { render: renderDeletions },
   dup: { render: renderDup },
   tables: { render: renderTables, serviceOnly: true },
@@ -2149,7 +2200,7 @@ function render() {
   const tab = TABS[S.tab] || TABS.review;
   if (S.mode === 'admin' && tab.serviceOnly) {
     v.append(el('div', { class: 'placeholder card' },
-      'このタブは service_role 接続時のみ利用できます（管理者ログインは審査キュー・通報審査・ペナルティ・退会・重複転記専用です）'));
+      'このタブは service_role 接続時のみ利用できます（管理者ログインは審査キュー・通報審査・ペナルティ・利用者数・退会・重複転記専用です）'));
     return;
   }
   v.append(tab.render());
